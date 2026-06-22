@@ -1,27 +1,19 @@
 package main
 
 import (
+	"GolangRabbitMQBroker/broker"
 	"log"
-	"net"
 )
 
 func main() {
-	ln, err := net.Listen("tcp", ":5672")
-	if err != nil {
-		log.Fatal(err)
+	serverconfig := &broker.ServerConfig{
+		ChannelMax:   10,
+		FramesMax:    10372,
+		HeartbeatSec: 10,
 	}
-
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			continue
-		}
-
-		go handleConnection(conn)
+	server := broker.NewServer(":5672", *serverconfig)
+	if err := server.ListenAndServe(); err != nil {
+		log.Println(err)
+		return
 	}
-}
-
-func handleConnection(net.Conn) {
-	log.Println("hello")
-
 }

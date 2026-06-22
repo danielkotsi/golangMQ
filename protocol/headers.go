@@ -16,6 +16,17 @@ const (
 	AuthMechanismPlain    = "plain"
 )
 
+// this is the protocol overview
+// TCP connect
+// → protocol header	     (client → server)
+// → connection.start        (server → client)
+// → connection.start_ok     (client → server)
+// → connection.tune         (server → client)
+// → connection.tune_ok      (client → server)
+// → connection.open         (client → server)
+// → connection.open_ok      (server → client)
+// → connection is now open
+// server
 type ConnectionStart struct {
 	Type            string       `json:"type"`
 	ServerName      string       `json:"server_name"`
@@ -28,18 +39,7 @@ type Capabilities struct {
 	Heartbeats bool `json:"heartbeats,omitempty"`
 }
 
-func NewConnectionStart() ConnectionStart {
-	return ConnectionStart{
-		Type:            TypeConnectionStart,
-		ServerName:      ServerName,
-		ProtocolVersion: ProtocolVersion,
-		AuthMechanism:   AuthMechanismPlain,
-		Capabilities: Capabilities{
-			Heartbeats: true,
-		},
-	}
-}
-
+// client
 type ConnectionStartOK struct {
 	Type          string `json:"type"`
 	ClientName    string `json:"client_name"`
@@ -48,16 +48,7 @@ type ConnectionStartOK struct {
 	Password      string `json:"password"`
 }
 
-func NewConnectionStartOK(clientname, username, password string) ConnectionStartOK {
-	return ConnectionStartOK{
-		Type:          TypeConnectionStartOK,
-		ClientName:    clientname,
-		AuthMechanism: AuthMechanismPlain,
-		Username:      username,
-		Password:      password,
-	}
-}
-
+// server
 type ConnectionTune struct {
 	Type         string `json:"type"`
 	ChannelMax   int    `json:"channel_max"`
@@ -65,19 +56,7 @@ type ConnectionTune struct {
 	HeartbeatSec int    `json:"heartbeat_sec"`
 }
 
-func NewConnectionTune(
-	channelMax int,
-	frameMax int,
-	heartbeatSec int,
-) ConnectionTune {
-	return ConnectionTune{
-		Type:         TypeConnectionTune,
-		ChannelMax:   channelMax,
-		FrameMax:     frameMax,
-		HeartbeatSec: heartbeatSec,
-	}
-}
-
+// client
 type ConnectionTuneOK struct {
 	Type         string `json:"type"`
 	ChannelMax   int    `json:"channel_max"`
@@ -85,15 +64,12 @@ type ConnectionTuneOK struct {
 	HeartbeatSec int    `json:"heartbeat_sec"`
 }
 
-func NewConnectionTuneOK(
-	channelMax int,
-	frameMax int,
-	heartbeatSec int,
-) ConnectionTuneOK {
-	return ConnectionTuneOK{
-		Type:         TypeConnectionTuneOK,
-		ChannelMax:   channelMax,
-		FrameMax:     frameMax,
-		HeartbeatSec: heartbeatSec,
-	}
+// client
+type ConnectionOpen struct {
+	Type string `json:"type"`
+}
+
+// server
+type ConnectionOpenOK struct {
+	Type string `json:"type"`
 }
