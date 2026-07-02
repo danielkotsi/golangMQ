@@ -1,71 +1,22 @@
 package broker
 
-import (
-	"log"
-	"net"
-	"sync"
-)
+import "sync"
 
-type Server struct {
-	addr        string
-	listener    net.Listener
-	mu          sync.Mutex
-	connections map[*Connection]struct{}
-	queues      map[string]*Queue
-	config      ServerConfig
-}
-type ServerConfig struct {
-	ChannelMax   int
-	FramesMax    int
-	HeartbeatSec int
+type Broker struct {
+	mu     sync.Mutex
+	queues map[string]*Queue
 }
 
-func NewServer(addr string, serverconfig ServerConfig) *Server {
-	return &Server{
-		addr:        addr,
-		config:      serverconfig,
-		connections: make(map[*Connection]struct{}),
-		queues:      make(map[string]*Queue),
+func NewBroker() *Broker {
+	return &Broker{
+		queues: make(map[string]*Queue),
 	}
 }
 
-func (s *Server) ListenAndServe() error {
-	ln, err := net.Listen("tcp", s.addr)
-	if err != nil {
-		return err
-	}
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return err
-		}
-
-		go s.HandleConnection(conn)
-	}
+func (b *Broker) DeclareQueue(queue string) error {
+	return nil
 }
 
-func (s *Server) HandleConnection(c net.Conn) {
-	conn := NewConnection(s, c)
-
-	s.mu.Lock()
-	s.connections[conn] = struct{}{}
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.connections, conn)
-		s.mu.Unlock()
-		c.Close()
-	}()
-
-	err := conn.RunHandshake()
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	err = conn.Serve()
-	if err != nil {
-		log.Println(err)
-		return
-	}
+func (b *Broker) Publish(queue string, msg []byte) error {
+	return nil
 }

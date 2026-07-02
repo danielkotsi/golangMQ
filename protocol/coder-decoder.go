@@ -13,11 +13,11 @@ func WriteMessage(w *bufio.Writer, data any) error {
 	}
 	_, err = w.Write(bytes)
 	if err != nil {
-		return nil
+		return err
 	}
 	err = w.WriteByte('\n')
 	if err != nil {
-		return nil
+		return err
 	}
 	return w.Flush()
 }

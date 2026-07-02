@@ -1,10 +1,8 @@
 package client
 
+import "GolangRabbitMQBroker/protocol"
+
 type Event struct {
-	Type string
+	Type protocol.Method
 	Data any
-}
-type Delivery struct {
-	queue string
-	//other missing parts as well
 }

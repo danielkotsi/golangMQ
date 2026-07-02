@@ -3,9 +3,12 @@ package client
 import (
 	"GolangRabbitMQBroker/protocol"
 	"bufio"
+	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
+	"sync"
 )
 
 type Config struct {
@@ -18,9 +21,13 @@ type Config struct {
 }
 
 type Client struct {
-	conn net.Conn
-	r    *bufio.Reader
-	w    *bufio.Writer
+	conn       net.Conn
+	mu         sync.Mutex
+	r          *bufio.Reader
+	w          *bufio.Writer
+	channels   map[uint16]*ClientChannel
+	nextChanID uint16
+	requestID  uint16
 
 	clientName   string
 	username     string
@@ -28,7 +35,7 @@ type Client struct {
 	channelMax   int
 	framesMax    int
 	heartbeatSec int
-	Incoming     chan any
+	Incoming     chan Event
 }
 
 func Dial(address string, cfg Config) (*Client, error) {
@@ -41,13 +48,69 @@ func Dial(address string, cfg Config) (*Client, error) {
 		conn:       conn,
 		r:          bufio.NewReader(conn),
 		w:          bufio.NewWriter(conn),
+		channels:   make(map[uint16]*ClientChannel),
 		clientName: cfg.ClientName,
 		username:   cfg.Username,
 		password:   cfg.Password,
-		Incoming:   make(chan any, 100),
+		Incoming:   make(chan Event, 100),
 	}
 
 	return c, nil
+}
+
+func (c *Client) nextRequestID() uint16 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.requestID++
+	return c.requestID
+}
+
+func (c *Client) nextChannelid() uint16 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.nextChanID++
+	return c.nextChanID
+}
+
+func (c *Client) OpenChannel(ctx context.Context) (ch *ClientChannel, err error) {
+	id := c.nextChannelid()
+	fmt.Println("this is the channel id:", id)
+	reqID := c.nextRequestID()
+	clientCh := NewClientChannel(id, c)
+	c.mu.Lock()
+	c.channels[id] = clientCh
+	c.mu.Unlock()
+
+	respCh := clientCh.registerREQ(reqID)
+
+	if err := c.WriteEnvelope(0, protocol.ChannelOpenType, reqID, protocol.ChannelOpen{
+		ID: id,
+	}); err != nil {
+		delete(c.channels, id)
+		return nil, err
+	}
+
+	//i am waiting for the response from the server
+	//if a channel.open-ok is read the channel unblocks with no error
+	//if an error is returned from the server
+	select {
+	case res := <-respCh:
+		if res.Err != nil {
+			delete(c.channels, id)
+			return nil, res.Err
+		}
+		fmt.Println("the channel open ok was recieved")
+		return clientCh, nil
+	case <-ctx.Done():
+		delete(c.channels, id)
+		ch.unRegisterREQ(reqID)
+		c.WriteEnvelope(0, protocol.ChannelCloseType, c.nextRequestID(), protocol.ChannelClose{
+			ID: id,
+		})
+		return nil, ctx.Err()
+	}
 }
 
 // Follow Protocol Rules to do Handshake or Return an Error
@@ -97,6 +160,19 @@ func (c *Client) Handshake() error {
 func (c *Client) WriteMessage(data any) error {
 	return protocol.WriteMessage(c.w, data)
 }
+func (c *Client) WriteEnvelope(channelID uint16, envType protocol.Method, reqID uint16, msg any) error {
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	env := protocol.Envelope{
+		ChannelID: channelID,
+		RequestID: reqID,
+		Type:      envType,
+		Payload:   payload,
+	}
+	return protocol.WriteMessage(c.w, env)
+}
 
 func (c *Client) WriteProtocolHeader() error {
 	return protocol.WriteProtocolHeader(c.w)
@@ -117,29 +193,40 @@ func (c *Client) ReadLoop() {
 			log.Println(err)
 			close(c.Incoming)
 		}
-		event, err := c.decode(env)
-		if err != nil {
-			log.Println(err)
+		switch env.Type {
+		case protocol.ChannelOpenOKType:
+			c.handleChannelOpenOK(env)
+		case protocol.ChannelCloseOKType:
+			c.handleChannelCloseOK(env)
+		default:
+			ch, ok := c.channels[env.ChannelID]
+			if !ok {
+				log.Println(env.ChannelID)
+				log.Println(env.RequestID)
+				log.Println(env.Type)
+				return
+			}
+			ch.route(env)
 		}
-		c.Incoming <- event
 	}
 }
 
-func (c *Client) decode(env protocol.Envelope) (Event, error) {
-	switch env.Type {
-	case "basic.deliver":
-		var delivery Delivery
-		err := json.Unmarshal(env.Payload, &delivery)
-		if err != nil {
-			return Event{}, err
-		}
-		return Event{
-			Type: env.Type,
-			Data: delivery,
-		}, nil
-	case "something else":
-		//case other cases:
-		//etc
+func (c *Client) handleChannelOpenOK(env protocol.Envelope) {
+	var channelOpenOK protocol.ChannelOpenOK
+	err := json.Unmarshal(env.Payload, &channelOpenOK)
+	if err != nil {
+		log.Println("unable to unmarshall server response")
 	}
-	return Event{}, nil
+	ch, ok := c.channels[channelOpenOK.ID]
+	if !ok {
+		log.Println("this is the channelID:", env.ChannelID)
+		log.Println("did not find channel")
+		return
+	}
+	ch.resolve(env.RequestID, Response{
+		Data: channelOpenOK,
+	})
+}
+
+func (c *Client) handleChannelCloseOK(env protocol.Envelope) {
 }

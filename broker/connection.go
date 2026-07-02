@@ -3,8 +3,11 @@ package broker
 import (
 	"GolangRabbitMQBroker/protocol"
 	"bufio"
+	"encoding/json"
+	"fmt"
 	"log"
 	"net"
+	"sync"
 )
 
 type ConnectionState string
@@ -21,20 +24,19 @@ const (
 type Connection struct {
 	server *Server
 
-	conn net.Conn
-	r    *bufio.Reader
-	w    *bufio.Writer
+	mu       sync.Mutex
+	conn     net.Conn
+	r        *bufio.Reader
+	w        *bufio.Writer
+	channels map[uint16]*Channel
 
 	state ConnectionState
 
-	clientName string
-	username   string
-
+	clientName   string
+	username     string
 	channelMax   int
 	frameMax     int
 	heartbeatSec int
-
-	channels map[uint16]*Channel
 }
 
 func NewConnection(server *Server, netConn net.Conn) *Connection {
@@ -51,14 +53,40 @@ func NewConnection(server *Server, netConn net.Conn) *Connection {
 
 func (c *Connection) Serve() error {
 	for {
-		c.WriteMessage("hello")
 		log.Println("serving now")
-		var str string
-		if err := c.ReadMessage(&str); err != nil {
+		env, err := c.ReadEnvelope()
+		if err != nil {
 			return err
 		}
+
+		c.Handle(env)
 	}
 }
+
+func (c *Connection) Handle(env protocol.Envelope) {
+	switch env.Type {
+	case protocol.ChannelOpenType:
+		c.ChannelOpen(env)
+		return
+	case protocol.ChannelCloseType:
+		c.ChannelClose(env)
+		return
+	}
+	c.routeToChannel(env)
+}
+
+func (c *Connection) routeToChannel(env protocol.Envelope) {
+	c.mu.Lock()
+	ch, ok := c.channels[env.ChannelID]
+	c.mu.Unlock()
+	if !ok {
+		c.WriteEnvelope(protocol.ErrorType, env.RequestID, protocol.Error{
+			Message: "channel with requested channelID not open for communication",
+		})
+	}
+	ch.route(env)
+}
+
 func (c *Connection) RunHandshake() error {
 	//read Header
 	err := c.ReadProtocolHeader()
@@ -114,10 +142,54 @@ func (c *Connection) WriteMessage(data any) error {
 	return protocol.WriteMessage(c.w, data)
 }
 
+func (c *Connection) WriteEnvelope(envType protocol.Method, reqID uint16, msg any) error {
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	env := protocol.Envelope{
+		RequestID: reqID,
+		Type:      envType,
+		Payload:   payload,
+	}
+	return protocol.WriteMessage(c.w, env)
+}
+
 func (c *Connection) ReadProtocolHeader() error {
 	return protocol.ReadProtocolHeader(c.r)
 }
 
 func (c *Connection) ReadMessage(pointer any) error {
 	return protocol.ReadMessage(c.r, pointer)
+}
+
+func (c *Connection) ReadEnvelope() (protocol.Envelope, error) {
+	var env protocol.Envelope
+	if err := protocol.ReadEnvelope(c.r, &env); err != nil {
+		return protocol.Envelope{}, err
+	}
+	return env, nil
+}
+
+func (c *Connection) ChannelOpen(env protocol.Envelope) {
+	var channelOpen protocol.ChannelOpen
+	err := json.Unmarshal(env.Payload, &channelOpen)
+	if err != nil {
+		log.Println("error unmarshalling")
+	}
+	fmt.Println("request for open channel was made with this channelID: ", channelOpen.ID)
+	id := channelOpen.ID
+	c.mu.Lock()
+	c.channels[id] = &Channel{id: id}
+	c.mu.Unlock()
+	c.WriteEnvelope(protocol.ChannelOpenOKType, env.RequestID, &protocol.ChannelOpenOK{
+		ID: id,
+	})
+}
+
+func (c *Connection) ChannelClose(env protocol.Envelope) {
+	id := env.ChannelID
+	c.mu.Lock()
+	delete(c.channels, id)
+	c.mu.Unlock()
 }
