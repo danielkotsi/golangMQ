@@ -26,11 +26,13 @@ const (
 
 	//Queue
 	//client
-	QueueDeclareType Method = "queue.declare"
-	QueueBindType    Method = "queue.bind"
+	QueueDeclareType    Method = "queue.declare"
+	ExchangeDeclareType Method = "exchange.declare"
+	QueueBindType       Method = "queue.bind"
 	//server
-	QueueDeclareOKType Method = "queue.declare-ok"
-	QueueBindOKType    Method = "queue.bind-ok"
+	QueueDeclareOKType    Method = "queue.declare-ok"
+	ExchangeDeclareOKType Method = "exchange.declare-ok"
+	QueueBindOKType       Method = "queue.bind-ok"
 
 	//error
 	ErrorType Method = "error"
@@ -59,12 +61,14 @@ type ChannelOpenOK struct {
 }
 
 type Publish struct {
-	Queue string `json:"queue"`
-	Body  []byte `json:"body"`
+	Exchange   string `json:"exchange"`
+	RoutingKey string `json:"routing_key"`
+	Body       []byte `json:"body"`
 }
 
 type Consume struct {
-	Queue string `json:"queue"`
+	Queue       string `json:"queue"`
+	ConsumerTag string `json:"consumer_tag"`
 }
 
 type ConsumeOK struct {
@@ -72,13 +76,14 @@ type ConsumeOK struct {
 }
 
 type Ack struct {
-	DeliveryTag string `json:"delivery_tag"`
+	DeliveryTag uint16 `json:"delivery_tag"`
 }
 
 type Deliver struct {
-	ConsumerTag string `json:"consumer_tag"`
-	Queue       string `json:"queue"`
+	DeliveryTag uint16 `json:"delivery_tag"`
 	Body        []byte `json:"body"`
+	Exchange    string `json:"exchange"`
+	RoutingKey  string `json:"routing_key"`
 }
 
 type QueueDeclare struct {
@@ -86,6 +91,14 @@ type QueueDeclare struct {
 }
 
 type QueueDeclareOK struct {
+	Name string `json:"name"`
+}
+
+type ExchangeDeclare struct {
+	Name string `json:"name"`
+}
+
+type ExchangeDeclareOK struct {
 	Name string `json:"name"`
 }
 

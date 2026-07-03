@@ -184,7 +184,7 @@ func (c *Connection) ChannelOpen(env protocol.Envelope) {
 	c.channels[id] = &Channel{
 		id:        id,
 		conn:      c,
-		server:    c.server,
+		broker:    c.server.Broker,
 		consumers: make(map[string]*Consumer),
 	}
 	c.mu.Unlock()

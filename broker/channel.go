@@ -3,87 +3,122 @@ package broker
 import (
 	"GolangRabbitMQBroker/protocol"
 	"encoding/json"
-	"fmt"
 	"log"
 )
 
 type Channel struct {
 	id        uint16
 	conn      *Connection
-	server    *Server
+	broker    *Broker
 	consumers map[string]*Consumer
 }
 
 func (ch *Channel) route(env protocol.Envelope) {
 	switch env.Type {
 	case protocol.BasicPublishType:
-		var event protocol.Publish
-		err := json.Unmarshal(env.Payload, &event)
-		if err != nil {
-			log.Println(err)
-		}
-		ch.HandlePublish(env.ChannelID, env.RequestID, ch.conn, &event)
+		ch.HandlePublish(env)
 	case protocol.BasicConsumeType:
-		var event protocol.Consume
-		fmt.Println("we are here")
-		fmt.Println("this is the channelID:", env.ChannelID)
-		fmt.Println("this is the reqID:", env.RequestID)
-		err := json.Unmarshal(env.Payload, &event)
-		if err != nil {
-			ch.conn.WriteEnvelope(env.ChannelID, protocol.ErrorType, env.RequestID, protocol.Error{
-				Message: err.Error(),
-			})
-		}
-		ch.HandleConsume(env.ChannelID, env.RequestID, ch.conn, &event)
+		ch.HandleConsume(env)
 	case protocol.BasicAckType:
-		var event protocol.Ack
-		err := json.Unmarshal(env.Payload, &event)
-		if err != nil {
-			ch.conn.WriteEnvelope(env.ChannelID, protocol.ErrorType, env.RequestID, protocol.Error{
-				Message: err.Error(),
-			})
-		}
-		ch.HandleAck(ch.conn, &event)
+		ch.HandleAck(env)
 	case protocol.QueueDeclareType:
-		fmt.Println("this is the channelID:", env.ChannelID)
-		var event protocol.QueueDeclare
-		err := json.Unmarshal(env.Payload, &event)
-		if err != nil {
-			log.Println(err)
-		}
-		ch.HandleQueueDeclare(ch.conn, &event)
+		ch.HandleQueueDeclare(env)
+	case protocol.ExchangeDeclareType:
+		ch.HandleExchangeDeclare(env)
 	case protocol.QueueBindType:
-		var event protocol.QueueBind
-		err := json.Unmarshal(env.Payload, &event)
-		if err != nil {
-			ch.conn.WriteEnvelope(env.ChannelID, protocol.ErrorType, env.RequestID, protocol.Error{
-				Message: err.Error(),
-			})
-		}
-		ch.HandleQueueBind(ch.conn, &event)
+		ch.HandleQueueBind(env)
 	}
 }
 
-func (ch *Channel) HandlePublish(channelID uint16, reqID uint16, conn *Connection, event *protocol.Publish) {
-	conn.WriteEnvelope(channelID, protocol.BasicDeliverType, reqID, protocol.Deliver{
-		Queue: event.Queue,
-		Body:  event.Body,
+func (ch *Channel) HandlePublish(env protocol.Envelope) {
+	var event protocol.Publish
+	err := json.Unmarshal(env.Payload, &event)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	err = ch.broker.Publish(event.Exchange, event.RoutingKey, event.Body)
+	if err != nil {
+		ch.conn.WriteEnvelope(env.ChannelID, protocol.ErrorType, env.RequestID, protocol.Error{
+			Message: err.Error(),
+		})
+		return
+	}
+}
+
+func (ch *Channel) HandleConsume(env protocol.Envelope) {
+	var event protocol.Consume
+	err := json.Unmarshal(env.Payload, &event)
+	if err != nil {
+		ch.conn.WriteEnvelope(env.ChannelID, protocol.ErrorType, env.RequestID, protocol.Error{
+			Message: err.Error(),
+		})
+		return
+	}
+
+	ch.broker.RegisterConsumer(event.ConsumerTag, event.Queue, ch)
+
+	ch.conn.WriteEnvelope(env.ChannelID, protocol.BasicConsumeOKType, env.RequestID, protocol.ConsumeOK{
+		ConsumerTag: event.ConsumerTag,
 	})
 }
 
-func (ch *Channel) HandleConsume(channelID uint16, reqID uint16, conn *Connection, event *protocol.Consume) {
-	fmt.Println("hello we got into the handle consume")
-	conn.WriteEnvelope(channelID, protocol.BasicConsumeOKType, reqID, protocol.ConsumeOK{
-		ConsumerTag: "daniel",
+func (ch *Channel) HandleAck(env protocol.Envelope) {
+	var event protocol.Ack
+	err := json.Unmarshal(env.Payload, &event)
+	if err != nil {
+		ch.conn.WriteEnvelope(env.ChannelID, protocol.ErrorType, env.RequestID, protocol.Error{
+			Message: err.Error(),
+		})
+		return
+	}
+
+	for _, consumer := range ch.consumers {
+		if _, ok := consumer.inflightTags[event.DeliveryTag]; ok {
+			ch.broker.Ack(consumer.queue.name, event.DeliveryTag)
+			return
+		}
+	}
+}
+
+func (ch *Channel) HandleExchangeDeclare(env protocol.Envelope) {
+	var event protocol.ExchangeDeclare
+	err := json.Unmarshal(env.Payload, &event)
+	if err != nil {
+		log.Println(err)
+	}
+
+	ch.broker.DeclareExchange(event.Name)
+
+	ch.conn.WriteEnvelope(env.ChannelID, protocol.ExchangeDeclareOKType, env.RequestID, protocol.ExchangeDeclareOK{
+		Name: event.Name,
 	})
 }
 
-func (ch *Channel) HandleAck(conn *Connection, event *protocol.Ack) {
+func (ch *Channel) HandleQueueDeclare(env protocol.Envelope) {
+	var event protocol.QueueDeclare
+	err := json.Unmarshal(env.Payload, &event)
+	if err != nil {
+		log.Println(err)
+	}
+	ch.broker.DeclareQueue(event.Name)
+
+	ch.conn.WriteEnvelope(env.ChannelID, protocol.QueueDeclareOKType, env.RequestID, protocol.QueueDeclareOK{
+		Name: event.Name,
+	})
 }
 
-func (ch *Channel) HandleQueueDeclare(conn *Connection, event *protocol.QueueDeclare) {
-	log.Println("this is the queue declare request")
-}
+func (ch *Channel) HandleQueueBind(env protocol.Envelope) {
+	var event protocol.QueueBind
+	err := json.Unmarshal(env.Payload, &event)
+	if err != nil {
+		ch.conn.WriteEnvelope(env.ChannelID, protocol.ErrorType, env.RequestID, protocol.Error{
+			Message: err.Error(),
+		})
+		return
+	}
+	ch.broker.BindQueue(event.Exchange, event.Queue, event.RoutingKey)
 
-func (ch *Channel) HandleQueueBind(conn *Connection, event *protocol.QueueBind) {
+	ch.conn.WriteEnvelope(env.ChannelID, protocol.QueueBindOKType, env.RequestID, protocol.QueueBindOK{})
 }

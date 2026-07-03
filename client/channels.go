@@ -96,6 +96,16 @@ func (ch *ClientChannel) route(env protocol.Envelope) error {
 			Data: declareOK,
 		})
 		return nil
+	case protocol.ExchangeDeclareOKType:
+		var exchangeOK protocol.ExchangeDeclareOK
+		err := json.Unmarshal(env.Payload, &exchangeOK)
+		if err != nil {
+			return err
+		}
+		ch.resolve(env.RequestID, Response{
+			Data: exchangeOK,
+		})
+		return nil
 	case protocol.QueueBindOKType:
 		var bindOK protocol.QueueBindOK
 		err := json.Unmarshal(env.Payload, &bindOK)
@@ -126,6 +136,7 @@ func (ch *ClientChannel) route(env protocol.Envelope) error {
 func (ch *ClientChannel) DeclareQueue(name string, ctx context.Context) (*Queue, error) {
 	reqID := ch.client.nextRequestID()
 	respCh := ch.registerREQ(reqID)
+
 	if err := ch.client.WriteChannelEnvelope(ch.id, protocol.QueueDeclareType, reqID, protocol.QueueDeclare{
 		Name: name,
 	}); err != nil {
@@ -145,6 +156,50 @@ func (ch *ClientChannel) DeclareQueue(name string, ctx context.Context) (*Queue,
 		return nil, ctx.Err()
 	}
 }
+func (ch *ClientChannel) DeclareExchange(name string, ctx context.Context) (exchange string, err error) {
+	reqID := ch.client.nextRequestID()
+	respCh := ch.registerREQ(reqID)
+
+	if err := ch.client.WriteChannelEnvelope(ch.id, protocol.ExchangeDeclareType, reqID, protocol.ExchangeDeclare{
+		Name: name,
+	}); err != nil {
+		return "", err
+	}
+
+	select {
+	case res := <-respCh:
+		if res.Err != nil {
+			return "", res.Err
+		}
+		return res.Data.(protocol.ExchangeDeclareOK).Name, nil
+	case <-ctx.Done():
+		ch.unRegisterREQ(reqID)
+		return "", ctx.Err()
+	}
+}
+func (ch *ClientChannel) BindQueue(queue, exchange, routingKey string, ctx context.Context) error {
+	reqID := ch.client.nextRequestID()
+	respCh := ch.registerREQ(reqID)
+
+	if err := ch.client.WriteChannelEnvelope(ch.id, protocol.QueueBindType, reqID, protocol.QueueBind{
+		Queue:      queue,
+		Exchange:   exchange,
+		RoutingKey: routingKey,
+	}); err != nil {
+		return err
+	}
+
+	select {
+	case res := <-respCh:
+		if res.Err != nil {
+			return res.Err
+		}
+		return nil
+	case <-ctx.Done():
+		ch.unRegisterREQ(reqID)
+		return ctx.Err()
+	}
+}
 
 func (ch *ClientChannel) Publish(event protocol.Publish) error {
 	reqID := ch.client.nextRequestID()
@@ -154,12 +209,16 @@ func (ch *ClientChannel) Publish(event protocol.Publish) error {
 	}
 	return nil
 }
+
+func (ch *ClientChannel) Ack(deliveryTag uint16) error {
+	return ch.client.WriteChannelEnvelope(ch.id, protocol.BasicAckType, 0, protocol.Ack{
+		DeliveryTag: deliveryTag,
+	})
+}
 func (ch *ClientChannel) Consume(queuename string, ctx context.Context) (chan protocol.Deliver, error) {
 	reqID := ch.client.nextRequestID()
 	respCh := ch.registerREQ(reqID)
 
-	fmt.Println("this is the channel id in the cnsume:", ch.id)
-	fmt.Println("this is the request id in the cnsume:", reqID)
 	if err := ch.client.WriteChannelEnvelope(ch.id, protocol.BasicConsumeType, reqID, protocol.Consume{
 		Queue: queuename,
 	}); err != nil {
