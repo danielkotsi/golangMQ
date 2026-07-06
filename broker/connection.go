@@ -112,7 +112,6 @@ func (c *Connection) shutdown() {
 
 func (c *Connection) Serve() error {
 	for {
-		log.Println("serving now")
 		env, err := c.ReadEnvelope()
 		if err != nil {
 			return err
@@ -243,7 +242,7 @@ func (c *Connection) ChannelOpen(env protocol.Envelope) {
 	var channelOpen protocol.ChannelOpen
 	err := json.Unmarshal(env.Payload, &channelOpen)
 	if err != nil {
-		log.Println("error unmarshalling")
+		log.Println(err)
 	}
 	id := channelOpen.ID
 	c.mu.Lock()

@@ -2,7 +2,6 @@ package broker
 
 import (
 	"GolangRabbitMQBroker/protocol"
-	"fmt"
 	"log"
 	"sync"
 )
@@ -70,16 +69,7 @@ func (q *Queue) unregisterConsumer(tag string) {
 
 func (q *Queue) selectConsumer() *Consumer {
 	for _, c := range q.consumers {
-		fmt.Println("this is the consumer id:", c.channel.id)
-		fmt.Println("this is the consumer tag:", c.tag)
-		fmt.Println("inflights:", c.inflight)
-		fmt.Println("prefetch:", c.prefetch)
-
 		if c.inflight < c.prefetch {
-			fmt.Println("this is the chosen consumer id:", c.channel.id)
-			fmt.Println("this is the chosen consumer tag:", c.tag)
-			fmt.Println("inflights:", c.inflight)
-			fmt.Println("prefetch:", c.prefetch)
 			return c
 		}
 	}
@@ -100,8 +90,6 @@ func (q *Queue) dispatchLoop() {
 			q.mu.Unlock()
 			continue
 		}
-		fmt.Println("this is the consumers channelID:", consumer.channel.id)
-
 		msg := q.messages[0]
 		q.messages = q.messages[1:]
 		consumer.inflight++
