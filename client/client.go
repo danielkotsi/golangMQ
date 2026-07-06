@@ -5,10 +5,16 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"sync"
 )
+
+type writeRequest struct {
+	data []byte
+	err  chan error
+}
 
 type Config struct {
 	ClientName   string
@@ -35,6 +41,10 @@ type Client struct {
 	framesMax    int
 	heartbeatSec int
 	Incoming     chan Event
+
+	writeCh   chan writeRequest
+	closeOnce sync.Once
+	closed    chan struct{}
 }
 
 func Dial(address string, cfg Config) (*Client, error) {
@@ -52,9 +62,49 @@ func Dial(address string, cfg Config) (*Client, error) {
 		username:   cfg.Username,
 		password:   cfg.Password,
 		Incoming:   make(chan Event, 100),
+
+		writeCh: make(chan writeRequest, 64),
+		closed:  make(chan struct{}),
 	}
+	go c.writePump()
 
 	return c, nil
+}
+
+func (c *Client) send(data []byte) error {
+	req := writeRequest{data: data, err: make(chan error, 1)}
+	select {
+	case c.writeCh <- req:
+		return <-req.err
+	case <-c.closed:
+		return fmt.Errorf("connection closed")
+	}
+}
+
+func (c *Client) writePump() {
+	for {
+		select {
+		case req := <-c.writeCh:
+			_, err := c.w.Write(req.data)
+			if err != nil {
+				req.err <- err
+				return
+			}
+			err = c.w.Flush()
+			req.err <- err
+			if err != nil {
+				return
+			}
+		case <-c.closed:
+			return
+		}
+	}
+}
+
+func (c *Client) shutdown() {
+	c.closeOnce.Do(func() {
+		close(c.closed)
+	})
 }
 
 func (c *Client) nextRequestID() uint16 {
@@ -155,7 +205,11 @@ func (c *Client) Handshake() error {
 }
 
 func (c *Client) WriteMessage(data any) error {
-	return protocol.WriteMessage(c.w, data)
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return c.send(append(bytes, '\n'))
 }
 func (c *Client) WriteChannelEnvelope(channelID uint16, envType protocol.Method, reqID uint16, msg any) error {
 	payload, err := json.Marshal(msg)
@@ -168,7 +222,11 @@ func (c *Client) WriteChannelEnvelope(channelID uint16, envType protocol.Method,
 		Type:      envType,
 		Payload:   payload,
 	}
-	return protocol.WriteMessage(c.w, env)
+	bytes, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	return c.send(append(bytes, '\n'))
 }
 func (c *Client) WriteEnvelope(envType protocol.Method, reqID uint16, msg any) error {
 	payload, err := json.Marshal(msg)
@@ -180,11 +238,15 @@ func (c *Client) WriteEnvelope(envType protocol.Method, reqID uint16, msg any) e
 		Type:      envType,
 		Payload:   payload,
 	}
-	return protocol.WriteMessage(c.w, env)
+	bytes, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	return c.send(append(bytes, '\n'))
 }
 
 func (c *Client) WriteProtocolHeader() error {
-	return protocol.WriteProtocolHeader(c.w)
+	return c.send([]byte(protocol.ProtocolHeader + "\n"))
 }
 
 func (c *Client) ReadMessage(pointer any) error {
@@ -196,11 +258,13 @@ func (c *Client) ReadEnvelope(env *protocol.Envelope) error {
 }
 
 func (c *Client) ReadLoop() {
+	defer c.shutdown()
 	for {
 		var env protocol.Envelope
 		if err := c.ReadEnvelope(&env); err != nil {
 			log.Println(err)
 			close(c.Incoming)
+			return
 		}
 		switch env.Type {
 		case protocol.ChannelOpenOKType:

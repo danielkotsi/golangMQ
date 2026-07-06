@@ -1,6 +1,9 @@
 package broker
 
-import "GolangRabbitMQBroker/protocol"
+import (
+	"GolangRabbitMQBroker/protocol"
+	"fmt"
+)
 
 type Consumer struct {
 	tag   string
@@ -15,6 +18,9 @@ type Consumer struct {
 }
 
 func NewConsumer(tag string, queue *Queue, ch *Channel) *Consumer {
+	if tag == "" {
+		tag = fmt.Sprintf("ch.%d.consumer.%d", ch.id, len(ch.consumers)+1)
+	}
 	return &Consumer{
 		tag:          tag,
 		queue:        queue,

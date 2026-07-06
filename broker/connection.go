@@ -4,10 +4,16 @@ import (
 	"GolangRabbitMQBroker/protocol"
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"sync"
 )
+
+type writeRequest struct {
+	data []byte
+	err  chan error
+}
 
 type ConnectionState string
 
@@ -36,10 +42,14 @@ type Connection struct {
 	channelMax   int
 	frameMax     int
 	heartbeatSec int
+
+	writeCh   chan writeRequest
+	closeOnce sync.Once
+	closed    chan struct{}
 }
 
 func NewConnection(server *Server, netConn net.Conn) *Connection {
-	return &Connection{
+	c := &Connection{
 		server: server,
 		conn:   netConn,
 		r:      bufio.NewReader(netConn),
@@ -47,7 +57,48 @@ func NewConnection(server *Server, netConn net.Conn) *Connection {
 
 		state:    StateAwaitProtocolHeader,
 		channels: make(map[uint16]*Channel),
+
+		writeCh: make(chan writeRequest, 64),
+		closed:  make(chan struct{}),
 	}
+	go c.writePump()
+	return c
+}
+
+func (c *Connection) send(data []byte) error {
+	req := writeRequest{data: data, err: make(chan error, 1)}
+	select {
+	case c.writeCh <- req:
+		return <-req.err
+	case <-c.closed:
+		return fmt.Errorf("connection closed")
+	}
+}
+
+func (c *Connection) writePump() {
+	for {
+		select {
+		case req := <-c.writeCh:
+			_, err := c.w.Write(req.data)
+			if err != nil {
+				req.err <- err
+				return
+			}
+			err = c.w.Flush()
+			req.err <- err
+			if err != nil {
+				return
+			}
+		case <-c.closed:
+			return
+		}
+	}
+}
+
+func (c *Connection) shutdown() {
+	c.closeOnce.Do(func() {
+		close(c.closed)
+	})
 }
 
 func (c *Connection) Serve() error {
@@ -81,6 +132,7 @@ func (c *Connection) routeToChannel(env protocol.Envelope) {
 		c.WriteEnvelope(env.ChannelID, protocol.ErrorType, env.RequestID, protocol.Error{
 			Message: "channel with requested channelID not open for communication",
 		})
+		return
 	}
 	ch.route(env)
 }
@@ -137,7 +189,11 @@ func (c *Connection) RunHandshake() error {
 }
 
 func (c *Connection) WriteMessage(data any) error {
-	return protocol.WriteMessage(c.w, data)
+	bytes, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return c.send(append(bytes, '\n'))
 }
 
 func (c *Connection) WriteEnvelope(channelID uint16, envType protocol.Method, reqID uint16, msg any) error {
@@ -151,7 +207,11 @@ func (c *Connection) WriteEnvelope(channelID uint16, envType protocol.Method, re
 		Type:      envType,
 		Payload:   payload,
 	}
-	return protocol.WriteMessage(c.w, env)
+	bytes, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	return c.send(append(bytes, '\n'))
 }
 
 func (c *Connection) ReadProtocolHeader() error {
