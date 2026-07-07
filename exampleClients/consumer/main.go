@@ -1,14 +1,14 @@
 package main
 
 import (
-	"GolangRabbitMQBroker/client"
 	"context"
+	"github.com/danielkotsi/golangMQSDK/gomqSDK"
 	"log"
 	"time"
 )
 
 func main() {
-	cfg := client.Config{
+	cfg := gomqSDK.Config{
 		ClientName:   "consumer",
 		Username:     "daniel",
 		Password:     "123456789",
@@ -17,7 +17,7 @@ func main() {
 		HeartbeatSec: 10,
 	}
 
-	c, err := client.Connect("localhost:5672", cfg)
+	c, err := gomqSDK.Connect("localhost:5672", cfg)
 	if err != nil {
 		log.Println(err)
 		return
@@ -68,7 +68,7 @@ func main() {
 	}
 }
 
-func workerB(c *client.Client) {
+func workerB(c *gomqSDK.Client) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -105,7 +105,7 @@ func workerB(c *client.Client) {
 	}
 }
 
-func workerC(c *client.Client) {
+func workerC(c *gomqSDK.Client) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
