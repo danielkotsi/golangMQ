@@ -82,7 +82,7 @@ Watch the consumer terminal — messages flow through, nack'd ones land in the D
 
 ## SDK Usage
 
-The example clients use the [Go SDK](`https://github.com/danielkotsi/golangMQSDK`) — `https://github.com/danielkotsi/golangMQSDK`
+The example clients use the [Go SDK](https://github.com/danielkotsi/golangMQSDK) - A client library to use the broker
 ```go
 import "github.com/danielkotsi/golangMQSDK/gomqSDK"
 import "github.com/danielkotsi/golangMQSDK/protocol"
