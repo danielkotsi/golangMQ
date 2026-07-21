@@ -80,6 +80,23 @@ go run exampleClients/publisher/main.go
 
 Watch the consumer terminal — messages flow through, nack'd ones land in the DLQ. Run the publisher as many times as you like to keep feeding messages.
 
+## Kubernetes in Docker (Kind)
+
+Run the broker inside a local Kind cluster:
+
+```bash
+# 1. Create the cluster with port mapping
+kind create cluster --config kind-config.yaml
+
+# 2. Deploy the broker
+kubectl apply -f deployment.yaml
+
+# 3. Expose via NodePort
+kubectl apply -f service.yaml
+```
+
+Connect using `localhost:30067` — the Kind node maps `30067` to the service's NodePort, which forwards to port `5672` on the pod.
+
 ## SDK Usage
 
 The example clients use the [Go SDK](https://github.com/danielkotsi/golangMQSDK) - A client library to use the broker
