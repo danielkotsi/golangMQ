@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: my-broker
+
+spec:
+  replicas: 1
+
+
+  selector: 
+    matchLabels:
+      app: my-broker
+
+  template:
+    metadata:
+      labels: 
+        app: my-broker
+
+    spec: 
+      containers:
+        - name: my-broker
+          image: danielkotsi/golangmq:latest
+          ports:
+            - containerPort: 5672
+
+
