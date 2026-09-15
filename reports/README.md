@@ -20,3 +20,4 @@ Index for the reports kept in this repository.
 | Report | File |
 |--------|------|
 | Phase-1 test suite + findings (integrationTests branch) | [`changes/integrationTests.md`](changes/integrationTests.md) |
+| F-001 fix — multiple consumers per channel (fix/finding-001 branch) | [`changes/f001.md`](changes/f001.md) |

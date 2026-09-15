@@ -65,10 +65,16 @@ func (ch *Channel) HandleConsume(env protocol.Envelope) {
 		return
 	}
 
-	ch.broker.RegisterConsumer(event.ConsumerTag, event.Queue, ch)
+	tag, err := ch.broker.RegisterConsumer(event.ConsumerTag, event.Queue, ch)
+	if err != nil {
+		ch.conn.WriteEnvelope(env.ChannelID, protocol.ErrorType, env.RequestID, protocol.Error{
+			Message: err.Error(),
+		})
+		return
+	}
 
 	ch.conn.WriteEnvelope(env.ChannelID, protocol.BasicConsumeOKType, env.RequestID, protocol.ConsumeOK{
-		ConsumerTag: event.ConsumerTag,
+		ConsumerTag: tag,
 	})
 }
 
