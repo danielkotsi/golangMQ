@@ -34,6 +34,10 @@ func (s *Server) ListenAndServe() error {
 	if err != nil {
 		return err
 	}
+	return s.Serve(ln)
+}
+
+func (s *Server) Serve(ln net.Listener) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
