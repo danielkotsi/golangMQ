@@ -61,6 +61,10 @@ type ChannelOpenOK struct {
 	ID uint16 `json:"id"`
 }
 
+type ChannelCloseOK struct {
+	ID uint16 `json:"id"`
+}
+
 type Publish struct {
 	Exchange   string `json:"exchange"`
 	RoutingKey string `json:"routing_key"`
