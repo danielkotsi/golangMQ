@@ -40,22 +40,24 @@ func TestMultiConsumer_ExactlyOnceAcrossWorkers(t *testing.T) {
 		publish(t, ch, exchange, routingKey, body(i))
 	}
 
-	// Drain each worker by reading deliveries round-robin and acking them.
+	// Drain each worker by reading deliveries as they arrive and acking them on
+	// the worker channel that carried each delivery. Workers are read through a
+	// merged stream: strict round-robin would stall whenever any single worker's
+	// stream runs dry before the shared queue is fully drained.
 	got := make([]string, 0, n)
+	md := mergeWorkerDeliveries(workerChs...)
 	for len(got) < n {
-		for _, wc := range workerChs {
-			select {
-			case d, ok := <-wc.Incoming:
-				if !ok {
-					t.Fatalf("worker channel closed at %d/%d deliveries", len(got), n)
-				}
-				got = append(got, string(d.Body))
-				if err := wc.Ack(d.DeliveryTag); err != nil {
-					t.Fatalf("ack: %v", err)
-				}
-			case <-time.After(defaultTimeout):
-				t.Fatalf("timed out draining workers; got %d/%d", len(got), n)
+		select {
+		case wd, ok := <-md:
+			if !ok {
+				t.Fatalf("worker channel closed at %d/%d deliveries", len(got), n)
 			}
+			got = append(got, string(wd.d.Body))
+			if err := wd.ch.Ack(wd.d.DeliveryTag); err != nil {
+				t.Fatalf("ack: %v", err)
+			}
+		case <-time.After(defaultTimeout):
+			t.Fatalf("timed out draining workers; got %d/%d", len(got), n)
 		}
 	}
 
@@ -140,21 +142,24 @@ func TestMultiConsumer_Distribution(t *testing.T) {
 	}
 
 	got := make([]string, 0, n)
+	workerIdx := make(map[*gomqSDK.ClientChannel]int, workers)
+	for i, wc := range workerChs {
+		workerIdx[wc] = i
+	}
+	md := mergeWorkerDeliveries(workerChs...)
 	for len(got) < n {
-		for i, wc := range workerChs {
-			select {
-			case d, ok := <-wc.Incoming:
-				if !ok {
-					t.Fatalf("worker channel closed")
-				}
-				got = append(got, string(d.Body))
-				perWorker[i]++
-				if err := wc.Ack(d.DeliveryTag); err != nil {
-					t.Fatalf("ack: %v", err)
-				}
-			case <-time.After(defaultTimeout):
-				t.Fatalf("timed out draining workers; got %d/%d (per-worker %v)", len(got), n, perWorker)
+		select {
+		case wd, ok := <-md:
+			if !ok {
+				t.Fatalf("worker channel closed")
 			}
+			got = append(got, string(wd.d.Body))
+			perWorker[workerIdx[wd.ch]]++
+			if err := wd.ch.Ack(wd.d.DeliveryTag); err != nil {
+				t.Fatalf("ack: %v", err)
+			}
+		case <-time.After(defaultTimeout):
+			t.Fatalf("timed out draining workers; got %d/%d (per-worker %v)", len(got), n, perWorker)
 		}
 	}
 

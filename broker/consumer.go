@@ -3,9 +3,12 @@ package broker
 import (
 	"GolangRabbitMQBroker/protocol"
 	"fmt"
+	"sync"
 )
 
 type Consumer struct {
+	mu sync.Mutex
+
 	tag   string
 	queue *Queue
 
