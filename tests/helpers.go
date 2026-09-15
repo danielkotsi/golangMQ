@@ -7,6 +7,7 @@ import (
 	"net"
 	"slices"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -207,6 +208,41 @@ func assertNoDelivery(t *testing.T, ch *gomqSDK.ClientChannel, wait time.Duratio
 		t.Fatalf("delivery channel closed: %s", desc)
 	case <-timer.C:
 	}
+}
+
+// workerDelivery pairs a delivery with the worker channel it arrived on, so
+// callers can ack/nack it on the correct channel.
+type workerDelivery struct {
+	ch *gomqSDK.ClientChannel
+	d  protocol.Deliver
+}
+
+// mergeWorkerDeliveries fans in the Incoming streams of several worker channels
+// into a single channel of deliveries, tagging each with its source worker. A
+// strict round-robin reader would stall as soon as any single worker's stream
+// runs dry (the distribution of messages across workers is uneven by design),
+// so multi-consumer drains read from the merged stream instead. The returned
+// channel closes once every source Incoming channel has closed.
+func mergeWorkerDeliveries(chs ...*gomqSDK.ClientChannel) <-chan workerDelivery {
+	out := make(chan workerDelivery, 100)
+
+	var wg sync.WaitGroup
+	wg.Add(len(chs))
+	for _, ch := range chs {
+		go func(ch *gomqSDK.ClientChannel) {
+			defer wg.Done()
+			for d := range ch.Incoming {
+				out <- workerDelivery{ch: ch, d: d}
+			}
+		}(ch)
+	}
+
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+
+	return out
 }
 
 // publish sends a single message over ch to the given routing key.
