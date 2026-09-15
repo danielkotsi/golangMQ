@@ -267,4 +267,5 @@ func (c *Connection) ChannelClose(env protocol.Envelope) {
 	if ok {
 		ch.cleanup()
 	}
+	c.WriteEnvelope(id, protocol.ChannelCloseOKType, env.RequestID, protocol.ChannelCloseOK{ID: id})
 }

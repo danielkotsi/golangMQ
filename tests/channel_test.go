@@ -51,10 +51,9 @@ func TestChannel_MultipleChannelsOverOneConnection(t *testing.T) {
 // its consumer and re-enqueues its unacked pending messages, observable by a
 // different channel consuming the same queue.
 //
-// Note: the broker currently processes the close (and requeues) but never
-// replies with channel.close-ok, so ClientChannel.Close relies on its context
-// deadline. The requeue below is asserted regardless; the missing close-ok is
-// tracked separately in reports/findings/F-003.md.
+// Note: the broker replies with channel.close-ok (fixed per F-003), so
+// ClientChannel.Close resolves on the response path rather than the context
+// deadline; the requeue below is asserted as well.
 func TestChannel_CloseRequeuesUnacked(t *testing.T) {
 	const n = 4
 
@@ -79,11 +78,14 @@ func TestChannel_CloseRequeuesUnacked(t *testing.T) {
 		t.Fatalf("expected %d deliveries, got %d", n, len(held))
 	}
 
-	// Close the channel. The broker requeues held (unacked) deliveries; the
-	// close-ok is never sent (F-003), so use a short context.
+	// Close the channel. The broker requeues held (unacked) deliveries and
+	// replies with channel.close-ok (F-003), so Close must resolve on the
+	// response path, not the context deadline.
 	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
 	defer cancel()
-	_ = ch.Close(ctx) // returns ctx.Err() due to F-003; requeue is what we assert
+	if err := ch.Close(ctx); err != nil {
+		t.Fatalf("close: %v", err)
+	}
 
 	// A different channel on the same client consumes the same queue: the
 	// re-enqueued bodies must arrive.
