@@ -18,15 +18,13 @@ func TestDisconnect_ConsumerUnackedRedelivered(t *testing.T) {
 	exchange, queue := declareFixture(t, ch, "disc-unacked")
 	routingKey := "test.key.disc-unacked"
 
-	if _, err := ch.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	deliveries := consumeOnChannel(t, ch, queue)
 
 	for i := 0; i < n; i++ {
 		publish(t, ch, exchange, routingKey, body(i))
 	}
 	// Deliveries are received but deliberately NOT acked.
-	held := collectDeliveries(t, ch, n)
+	held := collectDeliveries(t, deliveries, n)
 	want := sliceBodies(held)
 
 	// Disconnect the consumer outright (no ack). Any pending deliveries must
@@ -38,11 +36,9 @@ func TestDisconnect_ConsumerUnackedRedelivered(t *testing.T) {
 	// A fresh consumer on the same queue must see exactly the unacked bodies.
 	client2 := newTestClient(t, addr)
 	ch2 := client2.openChannel("disc-unacked-2")
-	if _, err := ch2.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume after disconnect: %v", err)
-	}
+	deliveries2 := consumeOnChannel(t, ch2, queue)
 
-	got := consumeAcked(t, ch2, n)
+	got := consumeAcked(t, ch2, deliveries2, n)
 	assertBodiesMultiset(t, got, want)
 }
 
@@ -59,9 +55,7 @@ func TestDisconnect_ProducerCloses(t *testing.T) {
 	cch := consumer.openChannel("disc-producer-cons")
 	exchange, queue := declareFixture(t, cch, "disc-producer")
 	routingKey := "test.key.disc-producer"
-	if _, err := cch.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	consDeliveries := consumeOnChannel(t, cch, queue)
 
 	// A producer publishes a batch, then closes its connection immediately.
 	producer := newTestClient(t, addr)
@@ -74,7 +68,7 @@ func TestDisconnect_ProducerCloses(t *testing.T) {
 	}
 
 	// The batch must still be delivered to the (still-attached) consumer.
-	got := consumeAcked(t, cch, n)
+	got := consumeAcked(t, cch, consDeliveries, n)
 	assertBodiesMultiset(t, got, sliceBodiesRange(n))
 
 	// A second producer publishes more; the consumer keeps receiving.
@@ -83,7 +77,7 @@ func TestDisconnect_ProducerCloses(t *testing.T) {
 	for i := n; i < n+3; i++ {
 		publish(t, p2ch, exchange, routingKey, body(i))
 	}
-	more := consumeAcked(t, cch, 3)
+	more := consumeAcked(t, cch, consDeliveries, 3)
 	assertBodiesMultiset(t, more, sliceBodiesRange(n+3)[n:])
 }
 
@@ -101,14 +95,12 @@ func TestDisconnect_RedeliveryExactness(t *testing.T) {
 	exchange, queue := declareFixture(t, ch, "disc-exact")
 	routingKey := "test.key.disc-exact"
 
-	if _, err := ch.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	chDeliveries := consumeOnChannel(t, ch, queue)
 
 	for i := 0; i < n; i++ {
 		publish(t, ch, exchange, routingKey, body(i))
 	}
-	deliveries := collectDeliveries(t, ch, n)
+	deliveries := collectDeliveries(t, chDeliveries, n)
 
 	// Ack the first ackCount; leave the rest unacked.
 	for i := 0; i < ackCount; i++ {
@@ -126,14 +118,12 @@ func TestDisconnect_RedeliveryExactness(t *testing.T) {
 	// must not reappear.
 	client2 := newTestClient(t, addr)
 	ch2 := client2.openChannel("disc-exact-2")
-	if _, err := ch2.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume after reconnect: %v", err)
-	}
+	ch2Deliveries := consumeOnChannel(t, ch2, queue)
 
-	redelivered := consumeAcked(t, ch2, n-ackCount)
+	redelivered := consumeAcked(t, ch2, ch2Deliveries, n-ackCount)
 	assertBodiesMultiset(t, redelivered, unacked)
 
-	assertNoDelivery(t, ch2, 700*time.Millisecond, "acked bodies must not be redelivered")
+	assertNoDelivery(t, ch2Deliveries, 700*time.Millisecond, "acked bodies must not be redelivered")
 }
 
 // sliceBodiesRange returns string bodies for body(0)..body(end-1).

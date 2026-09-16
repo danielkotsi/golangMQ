@@ -145,16 +145,30 @@ func assertEventually(t *testing.T, timeout time.Duration, desc string, cond fun
 	t.Fatalf("condition not met within %s: %s", timeout, desc)
 }
 
-// collectDeliveries reads n deliveries from the channel's Incoming with an
-// overall timeout, failing the test if the channel closes or the timeout
-// elapses before all n arrive.
-func collectDeliveries(t *testing.T, ch *gomqSDK.ClientChannel, n int) []protocol.Deliver {
+// consumeOnChannel starts consuming queue on ch and returns the per-consumer
+// delivery channel, failing the test on error. With the v0.3.0 SDK the channel
+// returned by Consume (keyed by consumer tag) is the only place deliveries land;
+// ch.Incoming is only a legacy fallback.
+func consumeOnChannel(t *testing.T, ch *gomqSDK.ClientChannel, queue string) <-chan protocol.Deliver {
 	t.Helper()
-	return collectDeliveriesTimeout(t, ch, n, defaultTimeout)
+
+	deliveries, err := ch.Consume(queue, testCtx(t))
+	if err != nil {
+		t.Fatalf("consume %s: %v", queue, err)
+	}
+	return deliveries
+}
+
+// collectDeliveries reads n deliveries from the consumer's delivery channel with
+// an overall timeout, failing the test if the channel closes or the timeout
+// elapses before all n arrive.
+func collectDeliveries(t *testing.T, deliveries <-chan protocol.Deliver, n int) []protocol.Deliver {
+	t.Helper()
+	return collectDeliveriesTimeout(t, deliveries, n, defaultTimeout)
 }
 
 // collectDeliveriesTimeout is collectDeliveries with a caller-supplied timeout.
-func collectDeliveriesTimeout(t *testing.T, ch *gomqSDK.ClientChannel, n int, timeout time.Duration) []protocol.Deliver {
+func collectDeliveriesTimeout(t *testing.T, deliveries <-chan protocol.Deliver, n int, timeout time.Duration) []protocol.Deliver {
 	t.Helper()
 
 	out := make([]protocol.Deliver, 0, n)
@@ -163,7 +177,7 @@ func collectDeliveriesTimeout(t *testing.T, ch *gomqSDK.ClientChannel, n int, ti
 
 	for len(out) < n {
 		select {
-		case d, ok := <-ch.Incoming:
+		case d, ok := <-deliveries:
 			if !ok {
 				t.Fatalf("delivery channel closed after %d/%d deliveries", len(out), n)
 			}
@@ -175,39 +189,47 @@ func collectDeliveriesTimeout(t *testing.T, ch *gomqSDK.ClientChannel, n int, ti
 	return out
 }
 
-// consumeAcked reads n deliveries from ch, acking each as it arrives (so the
-// broker keeps dispatching past the prefetch ceiling), and returns the bodies.
-func consumeAcked(t *testing.T, ch *gomqSDK.ClientChannel, n int) []string {
+// consumeAcked reads n deliveries from the consumer's channel, acking each on
+// ch as it arrives (so the broker keeps dispatching past the prefetch ceiling),
+// and returns the bodies.
+func consumeAcked(t *testing.T, ch *gomqSDK.ClientChannel, deliveries <-chan protocol.Deliver, n int) []string {
 	t.Helper()
 
 	bodies := make([]string, 0, n)
 	for len(bodies) < n {
-		deliveries := collectDeliveriesTimeout(t, ch, 1, defaultTimeout)
-		bodies = append(bodies, string(deliveries[0].Body))
-		if err := ch.Ack(deliveries[0].DeliveryTag); err != nil {
+		got := collectDeliveriesTimeout(t, deliveries, 1, defaultTimeout)
+		bodies = append(bodies, string(got[0].Body))
+		if err := ch.Ack(got[0].DeliveryTag); err != nil {
 			t.Fatalf("ack: %v", err)
 		}
 	}
 	return bodies
 }
 
-// assertNoDelivery requires that nothing arrives on ch within wait; it fails
-// the test if any delivery shows up. Use it to assert messages are dropped
+// assertNoDelivery requires that nothing arrives on deliveries within wait; it
+// fails the test if any delivery shows up. Use it to assert messages are dropped
 // (unbound routing key, unknown exchange, etc.).
-func assertNoDelivery(t *testing.T, ch *gomqSDK.ClientChannel, wait time.Duration, desc string) {
+func assertNoDelivery(t *testing.T, deliveries <-chan protocol.Deliver, wait time.Duration, desc string) {
 	t.Helper()
 
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 
 	select {
-	case d, ok := <-ch.Incoming:
+	case d, ok := <-deliveries:
 		if ok {
 			t.Fatalf("unexpected delivery (%q): %s", d.Body, desc)
 		}
 		t.Fatalf("delivery channel closed: %s", desc)
 	case <-timer.C:
 	}
+}
+
+// worker ties a delivery stream to the channel that carries it, so callers can
+// ack/nack each delivery on the correct channel.
+type worker struct {
+	ch         *gomqSDK.ClientChannel
+	deliveries <-chan protocol.Deliver
 }
 
 // workerDelivery pairs a delivery with the worker channel it arrived on, so
@@ -217,24 +239,24 @@ type workerDelivery struct {
 	d  protocol.Deliver
 }
 
-// mergeWorkerDeliveries fans in the Incoming streams of several worker channels
-// into a single channel of deliveries, tagging each with its source worker. A
-// strict round-robin reader would stall as soon as any single worker's stream
-// runs dry (the distribution of messages across workers is uneven by design),
-// so multi-consumer drains read from the merged stream instead. The returned
-// channel closes once every source Incoming channel has closed.
-func mergeWorkerDeliveries(chs ...*gomqSDK.ClientChannel) <-chan workerDelivery {
+// mergeWorkerDeliveries fans in the per-consumer delivery streams of several
+// workers into a single channel of deliveries, tagging each with its source
+// worker. A strict round-robin reader would stall as soon as any single
+// worker's stream runs dry (the distribution of messages across workers is
+// uneven by design), so multi-consumer drains read from the merged stream
+// instead. The returned channel closes once every source stream has closed.
+func mergeWorkerDeliveries(workers ...worker) <-chan workerDelivery {
 	out := make(chan workerDelivery, 100)
 
 	var wg sync.WaitGroup
-	wg.Add(len(chs))
-	for _, ch := range chs {
-		go func(ch *gomqSDK.ClientChannel) {
+	wg.Add(len(workers))
+	for _, w := range workers {
+		go func(w worker) {
 			defer wg.Done()
-			for d := range ch.Incoming {
-				out <- workerDelivery{ch: ch, d: d}
+			for d := range w.deliveries {
+				out <- workerDelivery{ch: w.ch, d: d}
 			}
-		}(ch)
+		}(w)
 	}
 
 	go func() {

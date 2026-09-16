@@ -114,6 +114,7 @@ func (q *Queue) dispatchLoop() {
 				Body:        msg.Body,
 				Exchange:    msg.Exchange,
 				RoutingKey:  msg.RoutingKey,
+				ConsumerTag: consumer.tag,
 			},
 		)
 		if err != nil {

@@ -25,12 +25,12 @@ func TestMultiConsumer_ExactlyOnceAcrossWorkers(t *testing.T) {
 	routingKey := "test.key.mc-workers"
 
 	workerChs := make([]*gomqSDK.ClientChannel, workers)
+	workerStreams := make([]worker, workers)
 	for i := 0; i < workers; i++ {
 		wc := client.openChannel("mc-worker")
-		if _, err := wc.Consume(queue, testCtx(t)); err != nil {
-			t.Fatalf("worker %d consume: %v", i, err)
-		}
+		deliveries := consumeOnChannel(t, wc, queue)
 		workerChs[i] = wc
+		workerStreams[i] = worker{ch: wc, deliveries: deliveries}
 	}
 
 	// Publish all messages.
@@ -45,7 +45,7 @@ func TestMultiConsumer_ExactlyOnceAcrossWorkers(t *testing.T) {
 	// merged stream: strict round-robin would stall whenever any single worker's
 	// stream runs dry before the shared queue is fully drained.
 	got := make([]string, 0, n)
-	md := mergeWorkerDeliveries(workerChs...)
+	md := mergeWorkerDeliveries(workerStreams...)
 	for len(got) < n {
 		select {
 		case wd, ok := <-md:
@@ -79,9 +79,7 @@ func TestMultiConsumer_PrefetchRespected(t *testing.T) {
 	routingKey := "test.key.mc-prefetch"
 
 	wc := client.openChannel("mc-prefetch-consumer")
-	if _, err := wc.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	deliveries := consumeOnChannel(t, wc, queue)
 
 	// Publish more than the prefetch ceiling without acking anything yet.
 	for i := 0; i < published; i++ {
@@ -90,10 +88,10 @@ func TestMultiConsumer_PrefetchRespected(t *testing.T) {
 
 	// Immediately-flowing window: only prefetch deliveries may arrive while
 	// nothing is acked.
-	burst := collectDeliveries(t, wc, prefetch)
+	burst := collectDeliveries(t, deliveries, prefetch)
 
 	// No more than prefetch may have been delivered before any ack.
-	assertNoDelivery(t, wc, prefetchWait(), "unacked messages must stop at the prefetch ceiling")
+	assertNoDelivery(t, deliveries, prefetchWait(), "unacked messages must stop at the prefetch ceiling")
 
 	// Ack the burst; the remainder must now flow.
 	for _, d := range burst {
@@ -101,7 +99,7 @@ func TestMultiConsumer_PrefetchRespected(t *testing.T) {
 			t.Fatalf("ack: %v", err)
 		}
 	}
-	rest := consumeAcked(t, wc, published-len(burst))
+	rest := consumeAcked(t, wc, deliveries, published-len(burst))
 	if len(rest) != published-prefetch {
 		t.Fatalf("expected %d remaining deliveries, got %d", published-prefetch, len(rest))
 	}
@@ -126,13 +124,13 @@ func TestMultiConsumer_Distribution(t *testing.T) {
 	routingKey := "test.key.mc-distribution"
 
 	workerChs := make([]*gomqSDK.ClientChannel, workers)
+	workerStreams := make([]worker, workers)
 	perWorker := make([]int, workers)
 	for i := 0; i < workers; i++ {
 		wc := client.openChannel("mc-worker")
-		if _, err := wc.Consume(queue, testCtx(t)); err != nil {
-			t.Fatalf("worker %d consume: %v", i, err)
-		}
+		deliveries := consumeOnChannel(t, wc, queue)
 		workerChs[i] = wc
+		workerStreams[i] = worker{ch: wc, deliveries: deliveries}
 	}
 
 	want := make([]string, 0, n)
@@ -146,7 +144,7 @@ func TestMultiConsumer_Distribution(t *testing.T) {
 	for i, wc := range workerChs {
 		workerIdx[wc] = i
 	}
-	md := mergeWorkerDeliveries(workerChs...)
+	md := mergeWorkerDeliveries(workerStreams...)
 	for len(got) < n {
 		select {
 		case wd, ok := <-md:

@@ -42,16 +42,17 @@ func TestFindingF001_SecondConsumeOnSameChannel(t *testing.T) {
 	}
 
 	// First consumer on the channel.
-	if _, err := ch.Consume("qa", ctx); err != nil {
+	firstDeliveries, err := ch.Consume("qa", ctx)
+	if err != nil {
 		t.Fatalf("first consume: %v", err)
 	}
 
 	// Publish and collect a delivery on the first consumer.
 	publish(t, ch, "main", "key", body(1))
-	first := collectDeliveries(t, ch, 1)
+	first := collectDeliveries(t, firstDeliveries, 1)
 
 	// Second consume on the SAME channel for a different queue.
-	_, err := ch.Consume("qb", ctx)
+	_, err = ch.Consume("qb", ctx)
 	if err != nil {
 		t.Logf("second consume rejected by broker: %v", err)
 		t.Logf("F-001 resolved via Option A (one consumer per channel)")
@@ -67,7 +68,7 @@ func TestFindingF001_SecondConsumeOnSameChannel(t *testing.T) {
 		t.Fatalf("nack: %v", err)
 	}
 
-	redel := collectDeliveriesTimeout(t, ch, 1, 2*time.Second)
+	redel := collectDeliveriesTimeout(t, firstDeliveries, 1, 2*time.Second)
 	if len(redel) != 1 {
 		t.Fatalf("expected 1 redelivery, got %d", len(redel))
 	}

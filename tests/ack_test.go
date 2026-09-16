@@ -17,9 +17,7 @@ func TestAck_FreesPrefetchSlot(t *testing.T) {
 	exchange, queue := declareFixture(t, ch, "ack-prefetch")
 	routingKey := "test.key.ack-prefetch"
 
-	if _, err := ch.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	deliveries := consumeOnChannel(t, ch, queue)
 
 	// Publish more than prefetch so the ceiling can actually be hit.
 	const published = prefetch + 5
@@ -28,17 +26,17 @@ func TestAck_FreesPrefetchSlot(t *testing.T) {
 	}
 
 	// Without acking, only prefetch messages may be dispatched.
-	held := collectDeliveries(t, ch, prefetch)
+	held := collectDeliveries(t, deliveries, prefetch)
 	if len(held) != prefetch {
 		t.Fatalf("expected %d deliveries while unacked, got %d", prefetch, len(held))
 	}
-	assertNoDelivery(t, ch, 300*time.Millisecond, "no delivery beyond prefetch while unacked")
+	assertNoDelivery(t, deliveries, 300*time.Millisecond, "no delivery beyond prefetch while unacked")
 
 	// Ack the first held message; the next one must now be dispatched.
 	if err := ch.Ack(held[0].DeliveryTag); err != nil {
 		t.Fatalf("ack: %v", err)
 	}
-	next := collectDeliveries(t, ch, 1)
+	next := collectDeliveries(t, deliveries, 1)
 	if string(next[0].Body) != string(body(prefetch)) {
 		t.Fatalf("body mismatch: got %q want %q", next[0].Body, body(prefetch))
 	}
@@ -54,24 +52,22 @@ func TestAck_UnknownTagNoop(t *testing.T) {
 	exchange, queue := declareFixture(t, ch, "ack-unknown")
 	routingKey := "test.key.ack-unknown"
 
-	if _, err := ch.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	deliveries := consumeOnChannel(t, ch, queue)
 
 	publish(t, ch, exchange, routingKey, body(1))
-	deliveries := collectDeliveries(t, ch, 1)
+	got := collectDeliveries(t, deliveries, 1)
 
 	// Acking a tag that was never issued must not panic or corrupt state.
 	if err := ch.Ack(9999); err != nil {
 		t.Fatalf("ack unknown tag: %v", err)
 	}
-	if err := ch.Ack(deliveries[0].DeliveryTag); err != nil {
+	if err := ch.Ack(got[0].DeliveryTag); err != nil {
 		t.Fatalf("ack valid tag: %v", err)
 	}
 
 	// Broker still dispatches normally afterwards.
 	publish(t, ch, exchange, routingKey, body(2))
-	after := collectDeliveries(t, ch, 1)
+	after := collectDeliveries(t, deliveries, 1)
 	if string(after[0].Body) != string(body(2)) {
 		t.Fatalf("body mismatch: got %q want %q", after[0].Body, body(2))
 	}
@@ -86,18 +82,16 @@ func TestNack_Requeue(t *testing.T) {
 	exchange, queue := declareFixture(t, ch, "nack-requeue")
 	routingKey := "test.key.nack-requeue"
 
-	if _, err := ch.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	deliveries := consumeOnChannel(t, ch, queue)
 
 	publish(t, ch, exchange, routingKey, body(1))
-	first := collectDeliveries(t, ch, 1)
+	first := collectDeliveries(t, deliveries, 1)
 
 	if err := ch.Nack(first[0].DeliveryTag, true); err != nil {
 		t.Fatalf("nack: %v", err)
 	}
 
-	redelivered := collectDeliveries(t, ch, 1)
+	redelivered := collectDeliveries(t, deliveries, 1)
 	if string(redelivered[0].Body) != string(body(1)) {
 		t.Fatalf("body mismatch after requeue: got %q want %q", redelivered[0].Body, body(1))
 	}
@@ -142,21 +136,17 @@ func TestNack_DeadLetter(t *testing.T) {
 	// its own channel.
 	dlqCh := client.openChannel("nack-dlx-dlq")
 
-	if _, err := ch.Consume("mainq", testCtx(t)); err != nil {
-		t.Fatalf("consume mainq: %v", err)
-	}
-	if _, err := dlqCh.Consume("dlq", testCtx(t)); err != nil {
-		t.Fatalf("consume dlq: %v", err)
-	}
+	mainqDeliveries := consumeOnChannel(t, ch, "mainq")
+	dlqDeliveries := consumeOnChannel(t, dlqCh, "dlq")
 
 	publish(t, ch, "main", "key", body(42))
-	d := collectDeliveries(t, ch, 1)
+	d := collectDeliveries(t, mainqDeliveries, 1)
 
 	if err := ch.Nack(d[0].DeliveryTag, false); err != nil {
 		t.Fatalf("nack: %v", err)
 	}
 
-	dead := collectDeliveriesTimeout(t, dlqCh, 1, defaultTimeout)
+	dead := collectDeliveriesTimeout(t, dlqDeliveries, 1, defaultTimeout)
 	if string(dead[0].Body) != string(body(42)) {
 		t.Fatalf("dead-letter body mismatch: got %q want %q", dead[0].Body, body(42))
 	}

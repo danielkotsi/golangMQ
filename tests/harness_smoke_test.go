@@ -23,24 +23,21 @@ func TestHarnessSmoke(t *testing.T) {
 	publish(t, ch, exchange, routingKey, body(1))
 	t.Log("published message")
 
-	_, err := ch.Consume(queue, testCtx(t))
-	if err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	deliveries := consumeOnChannel(t, ch, queue)
 	t.Log("consumer registered")
 
-	deliveries := collectDeliveriesTimeout(t, ch, 1, defaultTimeout)
+	got := collectDeliveriesTimeout(t, deliveries, 1, defaultTimeout)
 	t.Log("deliveries collected")
-	if len(deliveries) != 1 {
-		t.Fatalf("expected 1 delivery, got %d", len(deliveries))
+	if len(got) != 1 {
+		t.Fatalf("expected 1 delivery, got %d", len(got))
 	}
-	if string(deliveries[0].Body) != string(body(1)) {
-		t.Fatalf("body mismatch: got %q want %q", deliveries[0].Body, body(1))
+	if string(got[0].Body) != string(body(1)) {
+		t.Fatalf("body mismatch: got %q want %q", got[0].Body, body(1))
 	}
-	if deliveries[0].Exchange != exchange {
-		t.Fatalf("exchange mismatch: got %q want %q", deliveries[0].Exchange, exchange)
+	if got[0].Exchange != exchange {
+		t.Fatalf("exchange mismatch: got %q want %q", got[0].Exchange, exchange)
 	}
-	if deliveries[0].RoutingKey != routingKey {
-		t.Fatalf("routing key mismatch: got %q want %q", deliveries[0].RoutingKey, routingKey)
+	if got[0].RoutingKey != routingKey {
+		t.Fatalf("routing key mismatch: got %q want %q", got[0].RoutingKey, routingKey)
 	}
 }

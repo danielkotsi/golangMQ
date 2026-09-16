@@ -94,6 +94,7 @@ type Deliver struct {
 	Body        []byte `json:"body"`
 	Exchange    string `json:"exchange"`
 	RoutingKey  string `json:"routing_key"`
+	ConsumerTag string `json:"consumer_tag,omitempty"`
 }
 
 type QueueDeclare struct {

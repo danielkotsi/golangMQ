@@ -24,9 +24,7 @@ func TestMultiProducer_ConcurrentProducersOneConsumer(t *testing.T) {
 
 	// A single consumer drains the queue on its own channel.
 	consumerCh := client.openChannel("mp-consumer")
-	if _, err := consumerCh.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	consumerDeliveries := consumeOnChannel(t, consumerCh, queue)
 
 	// N concurrent producers, one channel each (publishing needs no consume).
 	want := make([]string, 0, producers*perProducer)
@@ -62,7 +60,7 @@ func TestMultiProducer_ConcurrentProducersOneConsumer(t *testing.T) {
 	}
 
 	// All published deliveries must arrive at the single consumer.
-	got := consumeAcked(t, consumerCh, producers*perProducer)
+	got := consumeAcked(t, consumerCh, consumerDeliveries, producers*perProducer)
 	assertBodiesMultiset(t, got, want)
 }
 
@@ -90,11 +88,9 @@ func TestMultiProducer_NoConsumerThenAttach(t *testing.T) {
 	}
 
 	// No consumer has been registered yet: nothing is lost, messages are queued.
-	if _, err := ch.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	deliveries := consumeOnChannel(t, ch, queue)
 
-	got := consumeAcked(t, ch, producers*perProducer)
+	got := consumeAcked(t, ch, deliveries, producers*perProducer)
 	assertBodiesMultiset(t, got, want)
 }
 
@@ -112,9 +108,7 @@ func TestMultiProducer_ConcurrentGoroutinePublish(t *testing.T) {
 	exchange, queue := declareFixture(t, ch, "mp-goroutine")
 	routingKey := "test.key.mp-goroutine"
 
-	if _, err := ch.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	deliveries := consumeOnChannel(t, ch, queue)
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, goroutines)
@@ -145,7 +139,7 @@ func TestMultiProducer_ConcurrentGoroutinePublish(t *testing.T) {
 		want = append(want, string(body(i)))
 	}
 
-	got := consumeAcked(t, ch, goroutines*perGoroutine)
+	got := consumeAcked(t, ch, deliveries, goroutines*perGoroutine)
 	assertBodiesMultiset(t, got, want)
 }
 
@@ -159,19 +153,17 @@ func TestMultiProducer_UnknownExchangeConcurrent(t *testing.T) {
 	exchange, queue := declareFixture(t, ch, "mp-unknown-ex")
 	routingKey := "test.key.mp-unknown-ex"
 
-	if _, err := ch.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	deliveries := consumeOnChannel(t, ch, queue)
 
 	publish(t, ch, exchange, routingKey, body(1))
 	publish(t, ch, "no.such.exchange", "whatever", body(2))
 	publish(t, ch, exchange, routingKey, body(3))
 
-	got := consumeAcked(t, ch, 2)
+	got := consumeAcked(t, ch, deliveries, 2)
 	assertBodiesMultiset(t, got, []string{string(body(1)), string(body(3))})
 
 	// The connection is still fully functional afterwards.
 	publish(t, ch, exchange, routingKey, body(4))
-	d := consumeAcked(t, ch, 1)
+	d := consumeAcked(t, ch, deliveries, 1)
 	assertBodiesMultiset(t, d, []string{string(body(4))})
 }

@@ -15,15 +15,13 @@ func TestPublishConsume_RoundTrip(t *testing.T) {
 
 	publish(t, ch, exchange, routingKey, body(1))
 
-	if _, err := ch.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	deliveries := consumeOnChannel(t, ch, queue)
 
-	deliveries := collectDeliveries(t, ch, 1)
-	if len(deliveries) != 1 {
-		t.Fatalf("expected 1 delivery, got %d", len(deliveries))
+	gotDeliveries := collectDeliveries(t, deliveries, 1)
+	if len(gotDeliveries) != 1 {
+		t.Fatalf("expected 1 delivery, got %d", len(gotDeliveries))
 	}
-	d := deliveries[0]
+	d := gotDeliveries[0]
 	if string(d.Body) != string(body(1)) {
 		t.Fatalf("body mismatch: got %q want %q", d.Body, body(1))
 	}
@@ -47,9 +45,7 @@ func TestPublishConsume_MultipleMessages(t *testing.T) {
 	routingKey := "test.key.multiple"
 
 	const n = 25
-	if _, err := ch.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	deliveries := consumeOnChannel(t, ch, queue)
 
 	// Consume first, then publish, so deliveries start flowing immediately.
 	want := make([]string, 0, n)
@@ -58,7 +54,7 @@ func TestPublishConsume_MultipleMessages(t *testing.T) {
 		publish(t, ch, exchange, routingKey, body(i))
 	}
 
-	got := consumeAcked(t, ch, n)
+	got := consumeAcked(t, ch, deliveries, n)
 	assertBodiesMultiset(t, got, want)
 }
 
@@ -71,11 +67,9 @@ func TestPublishConsume_UnboundRoutingKey(t *testing.T) {
 
 	publish(t, ch, exchange, "no.such.routing.key", body(1))
 
-	if _, err := ch.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	deliveries := consumeOnChannel(t, ch, queue)
 
-	assertNoDelivery(t, ch, 400*time.Millisecond, "unbound routing key should drop the message")
+	assertNoDelivery(t, deliveries, 400*time.Millisecond, "unbound routing key should drop the message")
 }
 
 func TestPublishConsume_UnknownExchange(t *testing.T) {
@@ -87,17 +81,15 @@ func TestPublishConsume_UnknownExchange(t *testing.T) {
 
 	publish(t, ch, "no.such.exchange", "whatever", body(1))
 
-	if _, err := ch.Consume(queue, testCtx(t)); err != nil {
-		t.Fatalf("consume: %v", err)
-	}
+	deliveries := consumeOnChannel(t, ch, queue)
 
 	// Publishing to an unknown exchange must not deliver anything, and must not
 	// disrupt the connection (subsequent valid operations still work).
-	assertNoDelivery(t, ch, 400*time.Millisecond, "unknown exchange should drop the message")
+	assertNoDelivery(t, deliveries, 400*time.Millisecond, "unknown exchange should drop the message")
 
 	publish(t, ch, exchange, "test.key.unknown-exchange", body(2))
-	deliveries := collectDeliveries(t, ch, 1)
-	if string(deliveries[0].Body) != string(body(2)) {
-		t.Fatalf("body mismatch: got %q want %q", deliveries[0].Body, body(2))
+	got := collectDeliveries(t, deliveries, 1)
+	if string(got[0].Body) != string(body(2)) {
+		t.Fatalf("body mismatch: got %q want %q", got[0].Body, body(2))
 	}
 }
