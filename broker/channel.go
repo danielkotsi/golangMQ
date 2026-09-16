@@ -65,10 +65,16 @@ func (ch *Channel) HandleConsume(env protocol.Envelope) {
 		return
 	}
 
-	ch.broker.RegisterConsumer(event.ConsumerTag, event.Queue, ch)
+	tag, err := ch.broker.RegisterConsumer(event.ConsumerTag, event.Queue, ch)
+	if err != nil {
+		ch.conn.WriteEnvelope(env.ChannelID, protocol.ErrorType, env.RequestID, protocol.Error{
+			Message: err.Error(),
+		})
+		return
+	}
 
 	ch.conn.WriteEnvelope(env.ChannelID, protocol.BasicConsumeOKType, env.RequestID, protocol.ConsumeOK{
-		ConsumerTag: event.ConsumerTag,
+		ConsumerTag: tag,
 	})
 }
 
@@ -83,7 +89,10 @@ func (ch *Channel) HandleAck(env protocol.Envelope) {
 	}
 
 	for _, consumer := range ch.consumers {
-		if _, ok := consumer.inflightTags[event.DeliveryTag]; ok {
+		consumer.mu.Lock()
+		_, ok := consumer.inflightTags[event.DeliveryTag]
+		consumer.mu.Unlock()
+		if ok {
 			ch.broker.Ack(consumer.queue.name, event.DeliveryTag)
 			return
 		}
@@ -106,26 +115,32 @@ func (ch *Channel) HandleNack(env protocol.Envelope) {
 	}
 
 	for _, consumer := range ch.consumers {
-		if msg, ok := consumer.pendingMessages[event.DeliveryTag]; ok {
+		consumer.mu.Lock()
+		msg, ok := consumer.pendingMessages[event.DeliveryTag]
+		if ok {
 			delete(consumer.inflightTags, event.DeliveryTag)
 			delete(consumer.pendingMessages, event.DeliveryTag)
 			consumer.inflight--
-
-			if requeue {
-				consumer.queue.mu.Lock()
-				consumer.queue.messages = append([]Message{msg}, consumer.queue.messages...)
-				consumer.queue.mu.Unlock()
-			} else if consumer.queue.dlx != "" {
-				routingKey := consumer.queue.dlxRoutingKey
-				if routingKey == "" {
-					routingKey = msg.RoutingKey
-				}
-				ch.broker.Publish(consumer.queue.dlx, routingKey, msg.Body)
-			}
-
-			consumer.queue.cond.Signal()
-			return
 		}
+		consumer.mu.Unlock()
+		if !ok {
+			continue
+		}
+
+		if requeue {
+			consumer.queue.mu.Lock()
+			consumer.queue.messages = append([]Message{msg}, consumer.queue.messages...)
+			consumer.queue.mu.Unlock()
+		} else if consumer.queue.dlx != "" {
+			routingKey := consumer.queue.dlxRoutingKey
+			if routingKey == "" {
+				routingKey = msg.RoutingKey
+			}
+			ch.broker.Publish(consumer.queue.dlx, routingKey, msg.Body)
+		}
+
+		consumer.queue.cond.Signal()
+		return
 	}
 }
 

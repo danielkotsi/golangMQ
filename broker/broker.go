@@ -77,18 +77,21 @@ func (b *Broker) Publish(exchangeName, routingKey string, body []byte) error {
 	return nil
 }
 
-func (b *Broker) RegisterConsumer(consumetTag, queue string, ch *Channel) error {
+func (b *Broker) RegisterConsumer(consumetTag, queue string, ch *Channel) (string, error) {
 	b.mu.Lock()
 	q, ok := b.queues[queue]
 	b.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("queue not found")
+		return "", fmt.Errorf("queue not found")
 	}
 	c := NewConsumer(consumetTag, q, ch)
+	if _, dup := ch.consumers[c.tag]; dup {
+		return "", fmt.Errorf("consumer tag %q already in use on channel %d", c.tag, ch.id)
+	}
 	q.registerConsumer(c)
-	ch.consumers[consumetTag] = c
+	ch.consumers[c.tag] = c
 
-	return nil
+	return c.tag, nil
 }
 
 func (b *Broker) Ack(queueName string, deliveryTag uint16) error {
@@ -102,14 +105,17 @@ func (b *Broker) Ack(queueName string, deliveryTag uint16) error {
 
 	q.mu.Lock()
 	for _, c := range q.consumers {
+		c.mu.Lock()
 		if _, found := c.inflightTags[deliveryTag]; found {
 			delete(c.inflightTags, deliveryTag)
 			delete(c.pendingMessages, deliveryTag)
 			c.inflight--
+			c.mu.Unlock()
 			q.mu.Unlock()
 			q.cond.Signal()
 			return nil
 		}
+		c.mu.Unlock()
 	}
 	q.mu.Unlock()
 
