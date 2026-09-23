@@ -70,7 +70,6 @@ func NewMetrics() *Metrics {
 		m.HandshakeFailures,
 		m.ConsumersRegistered,
 		m.ConsumersUnregistered,
-		&stateCollector{},
 	)
 
 	return m
@@ -90,7 +89,9 @@ func newCounter(name, help string) prometheus.Counter {
 	})
 }
 
-type stateCollector struct{}
+type stateCollector struct {
+	server *Server
+}
 
 var (
 	queueMessagesDesc = prometheus.NewDesc(
@@ -135,5 +136,26 @@ func (c *stateCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *stateCollector) Collect(ch chan<- prometheus.Metric) {
-	// Snapshot logic wired in Step 3.2.
+	s := c.server
+
+	s.mu.Lock()
+	ch <- prometheus.MustNewConstMetric(connectionsDesc, prometheus.GaugeValue, float64(len(s.connections)))
+	s.mu.Unlock()
+
+	b := s.Broker
+	b.mu.Lock()
+	ch <- prometheus.MustNewConstMetric(queuesDesc, prometheus.GaugeValue, float64(len(b.queues)))
+	ch <- prometheus.MustNewConstMetric(exchangesDesc, prometheus.GaugeValue, float64(len(b.exchanges)))
+	for _, q := range b.queues {
+		q.mu.Lock()
+		ch <- prometheus.MustNewConstMetric(queueMessagesDesc, prometheus.GaugeValue, float64(len(q.messages)), q.name)
+		ch <- prometheus.MustNewConstMetric(queueConsumersDesc, prometheus.GaugeValue, float64(len(q.consumers)), q.name)
+		for _, consumer := range q.consumers {
+			consumer.mu.Lock()
+			ch <- prometheus.MustNewConstMetric(consumerInflightDesc, prometheus.GaugeValue, float64(consumer.inflight), q.name, consumer.tag)
+			consumer.mu.Unlock()
+		}
+		q.mu.Unlock()
+	}
+	b.mu.Unlock()
 }

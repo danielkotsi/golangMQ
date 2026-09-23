@@ -7,21 +7,23 @@ metadata:
 spec:
   replicas: 1
 
-
-  selector: 
+  selector:
     matchLabels:
       app: my-broker
 
   template:
     metadata:
-      labels: 
+      labels:
         app: my-broker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
 
-    spec: 
+    spec:
       containers:
         - name: my-broker
           image: danielkotsi/golangmq:latest
           ports:
             - containerPort: 5672
-
-
+            - containerPort: 9090

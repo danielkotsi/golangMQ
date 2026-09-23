@@ -3,7 +3,10 @@ package broker
 import (
 	"log"
 	"net"
+	"net/http"
 	"sync"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type Server struct {
@@ -13,6 +16,7 @@ type Server struct {
 	connections map[*Connection]struct{}
 	config      ServerConfig
 	Broker      *Broker
+	metrics     *Metrics
 }
 type ServerConfig struct {
 	ChannelMax   int
@@ -21,12 +25,16 @@ type ServerConfig struct {
 }
 
 func NewServer(addr string, serverconfig ServerConfig) *Server {
-	return &Server{
+	s := &Server{
 		addr:        addr,
 		config:      serverconfig,
 		connections: make(map[*Connection]struct{}),
-		Broker:      NewBroker(),
 	}
+	m := NewMetrics()
+	m.Registry.MustRegister(&stateCollector{server: s})
+	s.metrics = m
+	s.Broker = NewBroker(m)
+	return s
 }
 
 func (s *Server) ListenAndServe() error {
@@ -54,7 +62,9 @@ func (s *Server) HandleConnection(c net.Conn) {
 	s.mu.Lock()
 	s.connections[conn] = struct{}{}
 	s.mu.Unlock()
+	s.metrics.ConnectionsOpened.Inc()
 	defer func() {
+		s.metrics.ConnectionsClosed.Inc()
 		conn.shutdown()
 		conn.cleanup()
 		s.mu.Lock()
@@ -65,6 +75,7 @@ func (s *Server) HandleConnection(c net.Conn) {
 
 	err := conn.RunHandshake()
 	if err != nil {
+		s.metrics.HandshakeFailures.Inc()
 		log.Println(err)
 		return
 	}
@@ -74,4 +85,8 @@ func (s *Server) HandleConnection(c net.Conn) {
 		log.Println(err)
 		return
 	}
+}
+
+func (s *Server) MetricsHandler() http.Handler {
+	return promhttp.HandlerFor(s.metrics.Registry, promhttp.HandlerOpts{})
 }

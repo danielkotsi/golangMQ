@@ -5,5 +5,5 @@ RUN go build -o /broker ./cmd/broker
 
 FROM alpine:3.19
 COPY --from=builder /broker /broker
-EXPOSE 5672
+EXPOSE 5672 9090
 CMD ["/broker"]

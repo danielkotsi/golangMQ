@@ -9,19 +9,21 @@ type Broker struct {
 	mu        sync.Mutex
 	queues    map[string]*Queue
 	exchanges map[string]*Exchange
+	metrics   *Metrics
 }
 
-func NewBroker() *Broker {
+func NewBroker(m *Metrics) *Broker {
 	return &Broker{
 		queues:    make(map[string]*Queue),
 		exchanges: make(map[string]*Exchange),
+		metrics:   m,
 	}
 }
 
 func (b *Broker) DeclareQueue(name, dlx, dlxRoutingKey string) {
 	b.mu.Lock()
 	if _, ok := b.queues[name]; !ok {
-		b.queues[name] = NewQueue(name, dlx, dlxRoutingKey)
+		b.queues[name] = NewQueue(name, dlx, dlxRoutingKey, b.metrics)
 	}
 	b.mu.Unlock()
 }
@@ -57,10 +59,16 @@ func (b *Broker) Publish(exchangeName, routingKey string, body []byte) error {
 	b.mu.Unlock()
 
 	if !ok {
+		b.metrics.PublishErrors.Inc()
 		return fmt.Errorf("exchange %q not found", exchangeName)
 	}
 
+	b.metrics.Published.WithLabelValues(exchangeName).Inc()
+
 	queues := ex.getQueues(routingKey)
+	if len(queues) == 0 {
+		b.metrics.PublishUnroutable.WithLabelValues(exchangeName).Inc()
+	}
 	for _, q := range queues {
 		q.mu.Lock()
 		tag := q.nextTag
@@ -91,6 +99,8 @@ func (b *Broker) RegisterConsumer(consumetTag, queue string, ch *Channel) (strin
 	q.registerConsumer(c)
 	ch.consumers[c.tag] = c
 
+	b.metrics.ConsumersRegistered.WithLabelValues(queue).Inc()
+
 	return c.tag, nil
 }
 
@@ -113,6 +123,7 @@ func (b *Broker) Ack(queueName string, deliveryTag uint16) error {
 			c.mu.Unlock()
 			q.mu.Unlock()
 			q.cond.Signal()
+			b.metrics.Acked.WithLabelValues(queueName).Inc()
 			return nil
 		}
 		c.mu.Unlock()
