@@ -16,7 +16,7 @@ type Channel struct {
 
 func (ch *Channel) cleanup() {
 	for _, consumer := range ch.consumers {
-		consumer.queue.unregisterConsumer(consumer.tag)
+		consumer.queue.unregisterConsumer(consumer)
 	}
 }
 
