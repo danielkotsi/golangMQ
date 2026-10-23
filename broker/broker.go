@@ -104,7 +104,7 @@ func (b *Broker) Ack(queueName string, deliveryTag uint16) error {
 	}
 
 	q.mu.Lock()
-	for _, c := range q.consumers {
+	for c := range q.consumers {
 		c.mu.Lock()
 		if _, found := c.inflightTags[deliveryTag]; found {
 			delete(c.inflightTags, deliveryTag)
