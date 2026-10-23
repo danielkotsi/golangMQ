@@ -1,0 +1,2 @@
+ts_start_rfc3339,window_ms,published,delivered,consumed,pub_rate_per_s,delivered_rate_per_s,consumed_rate_per_s,avg_delivery_lat_us,min_delivery_lat_us,max_delivery_lat_us,p50_delivery_lat_us,p95_delivery_lat_us,p99_delivery_lat_us,avg_ack_lat_us,duplicates,drops_cumulative,both_lat_p95_us,cons_lat_p95_us
+2026-10-23T14:22:13+03:00,70.7,1000,1000,1000,14136.40,14136.40,14136.40,27872.32,2425.23,51488.19,26924.11,48105.01,50712.53,17.33,0,0,48105.01,0.00

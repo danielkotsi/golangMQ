@@ -11,12 +11,12 @@ type Queue struct {
 	mu   sync.Mutex
 
 	messages  []Message
-	consumers map[string]*Consumer
+	consumers map[*Consumer]struct{}
 
 	cond    *sync.Cond
 	nextTag uint16
 
-	dlx          string
+	dlx           string
 	dlxRoutingKey string
 }
 
@@ -29,10 +29,10 @@ type Message struct {
 
 func NewQueue(name, dlx, dlxRoutingKey string) *Queue {
 	q := &Queue{
-		name:         name,
-		consumers:    make(map[string]*Consumer),
-		nextTag:      1,
-		dlx:          dlx,
+		name:          name,
+		consumers:     make(map[*Consumer]struct{}),
+		nextTag:       1,
+		dlx:           dlx,
 		dlxRoutingKey: dlxRoutingKey,
 	}
 	q.cond = sync.NewCond(&q.mu)
@@ -42,19 +42,18 @@ func NewQueue(name, dlx, dlxRoutingKey string) *Queue {
 
 func (q *Queue) registerConsumer(c *Consumer) {
 	q.mu.Lock()
-	q.consumers[c.tag] = c
+	q.consumers[c] = struct{}{}
 	q.mu.Unlock()
 	q.cond.Signal()
 }
 
-func (q *Queue) unregisterConsumer(tag string) {
+func (q *Queue) unregisterConsumer(c *Consumer) {
 	q.mu.Lock()
-	c, ok := q.consumers[tag]
-	if !ok {
+	if _, ok := q.consumers[c]; !ok {
 		q.mu.Unlock()
 		return
 	}
-	delete(q.consumers, tag)
+	delete(q.consumers, c)
 
 	c.mu.Lock()
 	for _, msg := range c.pendingMessages {
@@ -70,7 +69,7 @@ func (q *Queue) unregisterConsumer(tag string) {
 }
 
 func (q *Queue) selectConsumer() *Consumer {
-	for _, c := range q.consumers {
+	for c := range q.consumers {
 		c.mu.Lock()
 		free := c.inflight < c.prefetch
 		c.mu.Unlock()
