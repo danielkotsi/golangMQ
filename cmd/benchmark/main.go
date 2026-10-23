@@ -44,7 +44,7 @@ func run() int {
 	fs.DurationVar(&cfg.Warmup, "warmup", cfg.Warmup, "traffic counted but excluded from stats")
 	fs.DurationVar(&cfg.Report, "report", cfg.Report, "sampler cadence (CSV rows)")
 	fs.DurationVar(&cfg.DrainTimeout, "drain-timeout", cfg.DrainTimeout, "max wait for the queue to empty")
-	fs.StringVar(&cfg.Output, "output", cfg.Output, "CSV path (default bench-<runid>.csv; '-' = stdout)")
+	fs.StringVar(&cfg.Output, "output", cfg.Output, "CSV path (default bench-<runid>.csv; '-' = stdout, JSON summary then goes to stderr)")
 	fs.BoolVar(&cfg.Quiet, "quiet", cfg.Quiet, "suppress per-interval log lines")
 
 	fs.Usage = func() {
@@ -90,6 +90,10 @@ func run() int {
 		fmt.Fprintf(os.Stderr, "benchmark: marshal summary: %v\n", err)
 		return 1
 	}
-	fmt.Println(string(data))
+	if cfg.Output == "-" {
+		fmt.Fprintln(os.Stderr, string(data))
+	} else {
+		fmt.Println(string(data))
+	}
 	return 0
 }

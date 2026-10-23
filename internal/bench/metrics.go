@@ -134,16 +134,30 @@ type pubChStats struct {
 // the warmup boundary); window counters are swapped to zero by the sampler at
 // each interval.
 type stats struct {
+	// phaseMu makes the warmup/measured boundary atomic with respect to
+	// record calls. Every record call takes RLock; beginMeasured takes Lock,
+	// captures the sequence cutoff, and resets the measured counters while no
+	// record call can be in flight.
+	phaseMu   sync.RWMutex
+	phaseFrom uint64
+
 	published  atomic.Uint64
 	delivered  atomic.Uint64
 	consumed   atomic.Uint64
 	duplicates atomic.Uint64
 	drops      atomic.Uint64
 
-	pubW atomic.Uint64
-	delW atomic.Uint64
+	// all-time counters include warmup traffic and are never reset. They are
+	// used only to decide when an acking run is safe to shut down.
+	allPublished atomic.Uint64
+	allDelivered atomic.Uint64
+	allConsumed  atomic.Uint64
+	allAcks      atomic.Uint64
+
+	pubW  atomic.Uint64
+	delW  atomic.Uint64
 	consW atomic.Uint64
-	dupW atomic.Uint64
+	dupW  atomic.Uint64
 
 	delLatTot *latencySet
 	ackLatTot *latencySet
@@ -161,10 +175,10 @@ type stats struct {
 
 func newStats(t *Topology, total int) *stats {
 	s := &stats{
-		delLatTot: newLatencySet(),
-		ackLatTot: newLatencySet(),
-		delLatWin: newLatencySet(),
-		ackLatWin: newLatencySet(),
+		delLatTot:  newLatencySet(),
+		ackLatTot:  newLatencySet(),
+		delLatWin:  newLatencySet(),
+		ackLatWin:  newLatencySet(),
 		roleDelTot: make(map[string]*latencySet, len(roleKeys)),
 		roleDelWin: make(map[string]*latencySet, len(roleKeys)),
 		perConn:    make([]connStats, len(t.Conns)),
@@ -178,7 +192,15 @@ func newStats(t *Topology, total int) *stats {
 	return s
 }
 
-func (s *stats) recordPublish(sl *channelSlot, latUs float64) {
+func (s *stats) recordPublish(sl *channelSlot, seq uint64, latUs float64) {
+	s.allPublished.Add(1)
+
+	s.phaseMu.RLock()
+	defer s.phaseMu.RUnlock()
+	if seq <= s.phaseFrom {
+		return
+	}
+
 	s.published.Add(1)
 	s.pubW.Add(1)
 
@@ -195,7 +217,18 @@ func (s *stats) recordPublish(sl *channelSlot, latUs float64) {
 	}
 }
 
-func (s *stats) recordDeliver(sl *channelSlot, delLatUs float64, dup bool) {
+func (s *stats) recordDeliver(sl *channelSlot, seq uint64, delLatUs float64, dup bool) {
+	s.allDelivered.Add(1)
+	if !dup {
+		s.allConsumed.Add(1)
+	}
+
+	s.phaseMu.RLock()
+	defer s.phaseMu.RUnlock()
+	if seq <= s.phaseFrom {
+		return
+	}
+
 	s.delivered.Add(1)
 	s.delW.Add(1)
 	if dup {
@@ -223,9 +256,41 @@ func (s *stats) recordDeliver(sl *channelSlot, delLatUs float64, dup bool) {
 	cs.mu.Unlock()
 }
 
-func (s *stats) recordAck(latUs float64) {
+func (s *stats) recordAck(seq uint64, latUs float64) {
+	s.allAcks.Add(1)
+
+	s.phaseMu.RLock()
+	defer s.phaseMu.RUnlock()
+	if seq <= s.phaseFrom {
+		return
+	}
 	s.ackLatTot.add(latUs)
 	s.ackLatWin.add(latUs)
+}
+
+// drained reports whether a run has no more useful work in flight. Acking runs
+// wait for every message (warmup included) to be consumed and acked before the
+// clients are closed, so shutdown cannot race an in-flight Ack into a
+// misleading "connection closed" worker error. No-ack runs can never drain the
+// broker queue past its prefetch ceiling, so they use the measured counters.
+func (s *stats) drained(ack bool) bool {
+	if ack {
+		return s.allConsumed.Load() >= s.allPublished.Load() &&
+			s.allAcks.Load() >= s.allDelivered.Load()
+	}
+	return s.consumed.Load() >= s.published.Load()
+}
+
+// beginMeasured starts the measured phase. It captures the sequence cutoff
+// atomically with respect to publishers and resets measured counters. Messages
+// already allocated before the cutoff remain warmup traffic even if their
+// publish/deliver records arrive after the boundary.
+func (s *stats) beginMeasured(seq *atomic.Uint64) uint64 {
+	s.phaseMu.Lock()
+	defer s.phaseMu.Unlock()
+	s.phaseFrom = seq.Load()
+	s.resetAll()
+	return s.phaseFrom
 }
 
 // totals snapshots the whole-run counters for the JSON summary.
@@ -274,8 +339,9 @@ func (s *stats) sampleWindow(ts, end time.Time) intervalRecord {
 	return rec
 }
 
-// resetAll zeroes every accumulator. Called at the warmup/measured boundary so
-// warmup traffic is discarded.
+// resetAll zeroes every measured-phase accumulator. Called by beginMeasured
+// under phaseMu so warmup traffic is discarded without losing concurrent
+// measured records.
 func (s *stats) resetAll() {
 	s.published.Store(0)
 	s.delivered.Store(0)

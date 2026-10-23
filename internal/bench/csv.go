@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"io"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -32,29 +33,41 @@ var csvColumns = []string{
 
 // csvWriter serializes interval records behind a mutex so the sampler
 // goroutine is the sole producer but the engine can flush safely after stop.
+// The first write/flush error is retained and returned by every later call.
 type csvWriter struct {
-	mu sync.Mutex
-	w  *bufio.Writer
-	n  int
+	mu  sync.Mutex
+	w   *bufio.Writer
+	n   int
+	err error
 }
 
-func newCSVWriter(dst io.Writer) *csvWriter {
+func newCSVWriter(dst io.Writer) (*csvWriter, error) {
 	cw := &csvWriter{w: bufio.NewWriter(dst)}
-	cw.writeHeader()
-	return cw
-}
-
-func (c *csvWriter) writeHeader() {
-	for i, col := range csvColumns {
-		if i > 0 {
-			c.w.WriteString(",")
-		}
-		c.w.WriteString(col)
+	if err := cw.writeHeader(); err != nil {
+		return nil, err
 	}
-	c.w.WriteString("\n")
+	// Flush the header immediately so open-success/write-failure destinations
+	// (for example /dev/full) fail before workers start.
+	if err := cw.flush(); err != nil {
+		return nil, err
+	}
+	return cw, nil
 }
 
-func (c *csvWriter) writeInterval(r intervalRecord) {
+func (c *csvWriter) writeHeader() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err != nil {
+		return c.err
+	}
+	if _, err := c.w.WriteString(strings.Join(csvColumns, ",") + "\n"); err != nil {
+		c.err = err
+		return err
+	}
+	return nil
+}
+
+func (c *csvWriter) writeInterval(r intervalRecord) error {
 	row := []string{
 		r.TsStart.Format("2006-01-02T15:04:05Z07:00"),
 		strconv.FormatFloat(r.WindowMs, 'f', 1, 64),
@@ -79,33 +92,43 @@ func (c *csvWriter) writeInterval(r intervalRecord) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for i, v := range row {
-		if i > 0 {
-			c.w.WriteString(",")
-		}
-		c.w.WriteString(v)
+	if c.err != nil {
+		return c.err
 	}
-	c.w.WriteString("\n")
+	if _, err := c.w.WriteString(strings.Join(row, ",") + "\n"); err != nil {
+		c.err = err
+		return err
+	}
 	c.n++
+	return nil
 }
 
 func (c *csvWriter) flush() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.w.Flush()
+	if c.err != nil {
+		return c.err
+	}
+	if err := c.w.Flush(); err != nil {
+		c.err = err
+		return err
+	}
+	return nil
 }
 
-// close flushes the buffer and drops the writer (engine may call it after the
+// close flushes the buffer and drops the writer (engine calls it after the
 // sampler goroutine has exited).
 func (c *csvWriter) close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.w == nil {
-		return nil
+		return c.err
 	}
-	err := c.w.Flush()
+	if c.err == nil {
+		c.err = c.w.Flush()
+	}
 	c.w = nil
-	return err
+	return c.err
 }
 
 // perSec converts a window count into a messages-per-second rate. Zero-length

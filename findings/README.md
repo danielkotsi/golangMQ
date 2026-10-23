@@ -4,22 +4,21 @@ Date: 2026-10-23
 Scope: `cmd/benchmark/`, `internal/bench/`, and differential coverage in `tests/`
 Reference: `docs/BENCHMARK_HARNESS_BULLETPROOF_TESTING_PLAN.md`
 
-Production code was intentionally not changed. Each finding below has a test that
-fails against the current implementation. Tests marked intentional-failure must
-keep failing until the corresponding production behaviour is fixed.
+All findings below have regression coverage and have been fixed. The finding tests
+that originally reproduced these defects now pass against the corrected harness.
 
 ## Summary
 
-| ID | Severity | Area | Failing test | Status |
+| ID | Severity | Area | Regression test | Status |
 |---|---|---|---|---|
-| BENCH-001 | High | Warmup longer than workload | `TestFinding_Bench001_WarmupLongerThanWorkloadIsNotSilentlyZero` | Open |
-| BENCH-002 | High | Warmup accounting / drain | `TestFinding_Bench002_WarmupShorterThanWorkloadKeepsAccountingConsistent` | Open |
-| BENCH-003 | Medium | Topology global-index order | `TestTopology_RoleCarvingUsesGlobalIndexOrder` | Open |
-| BENCH-004 | High | CSV write/flush errors | `TestFinding_Bench004_CSVWriteErrorsMustBeReported` | Open |
-| BENCH-005 | Medium | CLI stdout stream mixing | `TestFinding_Bench005_OutputDashMustNotMixStreams` | Open |
-| BENCH-006 | Low-Medium | Concurrent run-ID uniqueness | `TestFinding_Bench006_RunIDUniqueUnderConcurrentGeneration` | Open |
-| BENCH-007 | Medium | Context cancellation reporting | `TestFinding_Bench007_ContextCancellationIsReported` | Open |
-| BENCH-008 | Low | No-ack ack-latency sample count | `TestFinding_Bench008_NoAckRecordsZeroAckLatencySamples` | Open |
+| BENCH-001 | High | Warmup longer than workload | `TestFinding_Bench001_WarmupLongerThanWorkloadIsNotSilentlyZero` | Fixed |
+| BENCH-002 | High | Warmup accounting / drain | `TestFinding_Bench002_WarmupShorterThanWorkloadKeepsAccountingConsistent` | Fixed |
+| BENCH-003 | Medium | Topology global-index order | `TestTopology_RoleCarvingUsesGlobalIndexOrder` | Fixed |
+| BENCH-004 | High | CSV write/flush errors | `TestFinding_Bench004_CSVWriteErrorsMustBeReported` | Fixed |
+| BENCH-005 | Medium | CLI stdout stream mixing | `TestFinding_Bench005_OutputDashMustNotMixStreams` | Fixed |
+| BENCH-006 | Low-Medium | Concurrent run-ID uniqueness | `TestFinding_Bench006_RunIDUniqueUnderConcurrentGeneration` | Fixed |
+| BENCH-007 | Medium | Context cancellation reporting | `TestFinding_Bench007_ContextCancellationIsReported` | Fixed |
+| BENCH-008 | Low | No-ack ack-latency sample count | `TestFinding_Bench008_NoAckRecordsZeroAckLatencySamples` | Fixed |
 
 ## Test suite state
 
@@ -29,22 +28,22 @@ Baseline and final verification used Go `go1.26.5-X:nodwarf5 linux/amd64`.
 |---|---|
 | `go build ./...` | Pass |
 | `go vet ./...` | Pass |
-| `go test ./tests -count=1` | Pass (`9.178s`) |
-| `go test -race ./tests -count=1` | Pass (`10.549s`) |
-| `go test ./internal/bench -count=1` | 7 expected failures, all other tests pass |
-| `go test -race ./internal/bench -count=1` | 7 expected failures, no `DATA RACE` reported |
-| `go test ./cmd/benchmark -count=1` | 1 expected failure (BENCH-005), all other tests pass |
+| `go test ./... -count=1` | Pass |
+| `go test -race ./... -count=1` | Pass (`internal/bench` 20.998s, `tests` 10.568s) |
+| `go test ./internal/bench -count=1` | Pass (all finding and harness tests) |
+| `go test -race ./internal/bench -count=1` | Pass, no `DATA RACE` reported |
+| `go test ./cmd/benchmark -count=1` | Pass, including BENCH-005 |
 
-The internal failures are BENCH-001, -002, -003, -004, -006, -007 and -008.
-The CLI failure is BENCH-005. BENCH-003's test is named
-`TestTopology_RoleCarvingUsesGlobalIndexOrder`, so it is included explicitly in
-the reproduction command below.
+All eight finding tests now pass:
+
+- BENCH-001 through BENCH-004, BENCH-006 through BENCH-008 in `internal/bench`.
+- BENCH-005 in `cmd/benchmark`.
 
 The differential suite (`tests/benchmark_differential_test.go`) passes. It runs a
 direct SDK reference client, tracks unique sequence numbers independently, and
 compares publish/consume/duplicate/drop accounting for acking and no-ack runs.
 
-## Reproduce
+## Verify fixes
 
 ```bash
 go test ./internal/bench \

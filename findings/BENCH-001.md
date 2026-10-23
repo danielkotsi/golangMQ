@@ -1,6 +1,6 @@
 # BENCH-001: Warmup longer than the workload silently returns an all-zero success
 
-- **Status:** Open
+- **Status:** Fixed
 - **Severity:** High
 - **Component:** `internal/bench/engine.go`
 - **Failing test:** `internal/bench/harness_bulletproof_test.go::TestFinding_Bench001_WarmupLongerThanWorkloadIsNotSilentlyZero`
@@ -71,3 +71,10 @@ Define and enforce the warmup contract at the boundary:
 
 The failing test accepts either a clear error or a correct nonzero measurement;
 it rejects only the silent all-zero success.
+
+## Resolution
+
+Fixed in `internal/bench/engine.go`. The engine watches publisher completion during
+warmup and treats an exhausted message budget as a clear error. `beginMeasured`
+also rejects a boundary at or beyond `publishers x msgs`, so a positive workload
+can no longer succeed with an all-zero summary.

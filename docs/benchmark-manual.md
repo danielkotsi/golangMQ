@@ -33,11 +33,13 @@ The default run:
 - writes `bench-<runid>.csv` in the current directory and prints the JSON summary to stdout.
 
 Exit code `0` means the run completed; inspect stderr for the planned topology and any
-warnings, and stdout for the machine-readable summary.
+warnings, and stdout for the machine-readable summary. With `-output -`, CSV owns stdout
+and the JSON summary is written to stderr instead, so stdout stays a single CSV stream.
 
 ### Reading a run's identity
 
-Every run gets a unique `runid` (e.g. `dlmyb6i5lbet`). It names the CSV
+Every run gets a unique `runid` (base36 timestamp, in-process sequence, and process nonce,
+e.g. `dlmyb6i5lbet-1-6d75f302317701ec`). It names the CSV
 (`bench-<runid>.csv`), the exchange/queue/routing-key used on the broker
 (`bench.ex.<runid>`, `bench.q.<runid>`, `bench.rk.<runid>`), and appears as
 `summary.runid`. Unique fixture names mean runs on a shared broker cannot interfere.
@@ -208,9 +210,11 @@ throughput run — the harness says so loudly.
 /tmp/benchmark -duration 30s -warmup 5s -report 1s
 ```
 
-Publishers run until the 30s deadline, then the engine drains the queue. Warmup traffic is
-discarded with a counter reset (summary and CSV cover only the measured phase: the sampler
-starts *after* the warmup window).
+Publishers run until the 30s deadline, then the engine drains the queue. Warmup is a phase
+boundary keyed by message sequence: traffic published before the boundary is excluded from
+the summary and CSV, and the sampler starts *after* the boundary. If the whole workload
+finishes during warmup, there is no measured work left and `Run` fails clearly instead of
+returning an all-zero success.
 
 ---
 
@@ -226,6 +230,8 @@ starts *after* the warmup window).
 - Per-interval log lines (suppressed with `-quiet`).
 - The final `run <runid> complete: published=N consumed=N drops=N elapsed=..ms csv=..`
   line.
+- With `-output -`, the JSON summary (normally on stdout) is also written to stderr so
+  stdout remains pure CSV.
 
 ### CSV (default `bench-<runid>.csv`, or `-output -` to stdout)
 
@@ -242,7 +248,7 @@ avg_ack_lat_us, duplicates, drops_cumulative, both_lat_p95_us, cons_lat_p95_us
 Latencies are in microseconds and measured client-side (see Limitations). `drops` is
 cumulative; `duplicates` are deliveries whose sequence number was seen twice.
 
-### JSON summary (stdout)
+### JSON summary (stdout; stderr with `-output -`)
 
 | Field | Meaning |
 |-------|---------|

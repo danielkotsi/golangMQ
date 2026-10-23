@@ -1,6 +1,6 @@
 # BENCH-008: No-ack runs record zero-valued ack-latency samples
 
-- **Status:** Open
+- **Status:** Fixed
 - **Severity:** Low
 - **Component:** `internal/bench/worker.go`, `internal/bench/metrics.go`
 - **Failing test:** `internal/bench/harness_bulletproof_test.go::TestFinding_Bench008_NoAckRecordsZeroAckLatencySamples`
@@ -72,3 +72,8 @@ added so the differential suite itself can remain a passing reference check.
   latency.
 - Assert `AckLatency.Count == 0` in no-ack tests in addition to checking the
   value fields.
+
+## Resolution
+
+Fixed in `internal/bench/worker.go`. `recordAck` is now called only inside the
+`-ack` branch, so no-ack runs report zero ack-latency samples.

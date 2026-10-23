@@ -1,6 +1,6 @@
 # BENCH-007: Context cancellation is reported as a connection failure
 
-- **Status:** Open
+- **Status:** Fixed
 - **Severity:** Medium
 - **Component:** `internal/bench/engine.go`
 - **Failing test:** `internal/bench/harness_bulletproof_test.go::TestFinding_Bench007_ContextCancellationIsReported`
@@ -80,3 +80,10 @@ worker failure.
 - Suppress or annotate worker errors that are consequences of cancellation.
 - Log actual elapsed drain time, not the configured timeout, when bailing out.
 - Define whether a cancelled run returns partial results; test that contract.
+
+## Resolution
+
+Fixed in `internal/bench/engine.go`. Setup derives from the caller context,
+cancellation stops publishers, skips drain, and shuts workers down before the
+engine returns an error wrapping `context.Canceled`. Cancellation is checked before
+derivative worker/close errors, and drain warnings now report actual elapsed time.

@@ -1,6 +1,6 @@
 # BENCH-002: Warmup shorter than the workload corrupts accounting and drain
 
-- **Status:** Open
+- **Status:** Fixed
 - **Severity:** High
 - **Component:** `internal/bench/engine.go`, `internal/bench/metrics.go`
 - **Failing test:** `internal/bench/harness_bulletproof_test.go::TestFinding_Bench002_WarmupShorterThanWorkloadKeepsAccountingConsistent`
@@ -95,3 +95,12 @@ Make warmup a real phase boundary rather than a counter wipe:
   as measured consumption.
 - Do not close clients while workers still have acks to complete; separate
   cancellation from normal drain.
+
+## Resolution
+
+Fixed in `internal/bench/metrics.go` and `internal/bench/engine.go`. Warmup now
+captures a message-sequence cutoff atomically with the counter reset. Messages
+allocated before the cutoff stay excluded even when their publish/deliver records
+arrive after the boundary. Draining for acking runs also waits for all-time
+consumption and acks before clients are closed, so shutdown cannot race an
+in-flight Ack into a connection error.

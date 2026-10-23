@@ -2,6 +2,7 @@ package bench
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/danielkotsi/golangMQSDK/gomqSDK"
 )
@@ -10,7 +11,7 @@ import (
 type ConnRole int
 
 const (
-	ConnMixed       ConnRole = iota
+	ConnMixed ConnRole = iota
 	ConnPublishOnly
 	ConnConsumeOnly
 )
@@ -62,15 +63,16 @@ func (r Role) key() string {
 }
 
 // channelSlot is one channel in the plan: its connection, its position within
-// the connection, its role, and the goroutines placed on it. placement order
-// within connPlans is the authoritative iteration order everywhere.
+// the connection, its global index, its role, and the goroutines placed on it.
+// connPlan order is channel-open order; role carving and capability lists use
+// global-index order.
 type channelSlot struct {
-	Conn        int
-	Ch          int          // index within the connection (0-based open order)
-	GlobalIndex int          // order assigned during channel->conn placement
-	Role        Role
-	PubGoroutines  []int     // publisher goroutine indices placed here
-	ConsGoroutines []int     // consumer goroutine indices placed here
+	Conn           int
+	Ch             int // index within the connection (0-based open order)
+	GlobalIndex    int // order assigned during channel->conn placement
+	Role           Role
+	PubGoroutines  []int // publisher goroutine indices placed here
+	ConsGoroutines []int // consumer goroutine indices placed here
 
 	publishCapIdx int // index into publishCapable, -1 when not publish-capable
 	client        *gomqSDK.ClientChannel
@@ -85,15 +87,17 @@ type connPlan struct {
 
 // Topology is the fully resolved benchmark plan.
 type Topology struct {
-	Conns           []connPlan
-	publishCapable  []*channelSlot
-	consumeCapable  []*channelSlot
+	Conns          []connPlan
+	publishCapable []*channelSlot
+	consumeCapable []*channelSlot
 }
 
-// PublishCapable returns the publish-capable channels (P∪B) in plan order.
+// PublishCapable returns the publish-capable channels (P∪B) in global-index
+// order.
 func (t *Topology) PublishCapable() []*channelSlot { return t.publishCapable }
 
-// ConsumeCapable returns the consume-capable channels (C∪B) in plan order.
+// ConsumeCapable returns the consume-capable channels (C∪B) in global-index
+// order.
 func (t *Topology) ConsumeCapable() []*channelSlot { return t.consumeCapable }
 
 // Build resolves a Config into a deterministic Topology. It runs Validate
@@ -150,18 +154,19 @@ func buildTopology(c *Config, assignWorkers bool) (*Topology, error) {
 		}
 	}
 
-	// Build slots; allSlots ends up in global index order for every placement
-	// mode (even and packing both assign ascending indices per connection, and
-	// connections are visited ascending).
+	// Build slots connection-major for opening, then sort the authoritative
+	// placement slice into global index order. Even placement interleaves
+	// indices across connections (0,2,4,1,3,5 for 2 conns x 6 channels), so
+	// relying on the loop order would violate the documented order.
 	t := &Topology{}
 	allSlots := make([]*channelSlot, 0, c.Channels)
 	for cn := 0; cn < n; cn++ {
 		cp := connPlan{Conn: cn, Role: roles[cn]}
 		for j, gi := range chans[cn] {
 			sl := &channelSlot{
-				Conn:        cn,
-				Ch:          j,
-				GlobalIndex: gi,
+				Conn:          cn,
+				Ch:            j,
+				GlobalIndex:   gi,
 				publishCapIdx: -1,
 			}
 			switch roles[cn] {
@@ -175,6 +180,10 @@ func buildTopology(c *Config, assignWorkers bool) (*Topology, error) {
 		}
 		t.Conns = append(t.Conns, cp)
 	}
+
+	sort.Slice(allSlots, func(i, j int) bool {
+		return allSlots[i].GlobalIndex < allSlots[j].GlobalIndex
+	})
 
 	// Role stamping on mixed conns only: walk mixed slots in global index
 	// order; the first -pub-channels become P, the next -cons-channels C,
@@ -203,26 +212,19 @@ func buildTopology(c *Config, assignWorkers bool) (*Topology, error) {
 		}
 	}
 
-	// Capability lists. Pass 1 collects role-stamped channels; pass 2 appends
-	// the BOTH channels so each list is ordered P/C then B (matches the plan's
-	// worked example placement — slot2 in publish-capable is channel 3, not
-	// channel 1).
-	for ci := range t.Conns {
-		for _, sl := range t.Conns[ci].Channels {
-			switch sl.Role {
-			case RolePublish:
-				t.publishCapable = append(t.publishCapable, sl)
-			case RoleConsume:
-				t.consumeCapable = append(t.consumeCapable, sl)
-			}
-		}
-	}
-	for ci := range t.Conns {
-		for _, sl := range t.Conns[ci].Channels {
-			if sl.Role == RoleBoth {
-				t.publishCapable = append(t.publishCapable, sl)
-				t.consumeCapable = append(t.consumeCapable, sl)
-			}
+	// Capability lists in global-index order: P∪B for publishers and C∪B for
+	// consumers. Walking allSlots once preserves interleaving (for example
+	// global indices 0,1,4,5 in publish-capable), which is the documented
+	// contract used by worker placement and plan output.
+	for _, sl := range allSlots {
+		switch sl.Role {
+		case RolePublish:
+			t.publishCapable = append(t.publishCapable, sl)
+		case RoleConsume:
+			t.consumeCapable = append(t.consumeCapable, sl)
+		case RoleBoth:
+			t.publishCapable = append(t.publishCapable, sl)
+			t.consumeCapable = append(t.consumeCapable, sl)
 		}
 	}
 	for i, sl := range t.publishCapable {

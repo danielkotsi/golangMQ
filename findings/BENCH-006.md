@@ -1,6 +1,6 @@
 # BENCH-006: `newRunID` collides under concurrent generation
 
-- **Status:** Open
+- **Status:** Fixed
 - **Severity:** Low-Medium
 - **Component:** `internal/bench/engine.go`
 - **Failing test:** `internal/bench/harness_bulletproof_test.go::TestFinding_Bench006_RunIDUniqueUnderConcurrentGeneration`
@@ -77,3 +77,9 @@ Generate IDs with multiple entropy sources, for example:
 
 Keep IDs filesystem-safe and reasonably short. Add a concurrency test to the
 production package so future changes cannot regress uniqueness.
+
+## Resolution
+
+Fixed in `internal/bench/engine.go`. Run IDs now combine a base36 timestamp, a
+process-wide atomic sequence, and a per-process random nonce, preventing collisions
+for concurrent callers and concurrent processes.

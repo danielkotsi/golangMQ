@@ -1,6 +1,6 @@
 # BENCH-004: CSV write and flush errors are silently ignored
 
-- **Status:** Open
+- **Status:** Fixed
 - **Severity:** High
 - **Component:** `internal/bench/csv.go`, `internal/bench/engine.go`
 - **Failing test:** `internal/bench/harness_bulletproof_test.go::TestFinding_Bench004_CSVWriteErrorsMustBeReported`
@@ -69,3 +69,10 @@ or propagates it.
 - Have `Run` return the output error and skip a success summary.
 - Add tests for header-write failure, interval-write failure, flush failure, and
   close failure (not only open failure).
+
+## Resolution
+
+Fixed in `internal/bench/csv.go` and `internal/bench/engine.go`. The CSV writer
+retains the first write/flush error, the header is flushed immediately, sampler
+write failures stop sampling, and `Run` returns the close/flush error instead of
+a success result.

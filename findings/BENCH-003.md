@@ -1,6 +1,6 @@
 # BENCH-003: Role carving ignores the documented global channel order
 
-- **Status:** Open
+- **Status:** Fixed
 - **Severity:** Medium
 - **Component:** `internal/bench/topology.go`
 - **Failing test:** `internal/bench/harness_bulletproof_test.go::TestTopology_RoleCarvingUsesGlobalIndexOrder`
@@ -90,3 +90,10 @@ also inherits the resulting connection-major order.
 - Build `publishCapable` and `consumeCapable` in documented global-index order.
 - Update the misleading `allSlots` comment and add a regression assertion for
   even, uneven, and separated topologies.
+
+## Resolution
+
+Fixed in `internal/bench/topology.go`. The placement slice is sorted by global
+index before mixed-slot role carving and capability-list construction. Both
+`publish-capable` and `consume-capable` are now emitted in documented global-index
+order.

@@ -68,7 +68,7 @@ func (w *publishWorker) run() error {
 		}); err != nil {
 			return err
 		}
-		w.st.recordPublish(w.slot, float64(time.Since(t0).Nanoseconds())/1000)
+		w.st.recordPublish(w.slot, seq, float64(time.Since(t0).Nanoseconds())/1000)
 	}
 	return nil
 }
@@ -104,17 +104,15 @@ func (w *consumeWorker) run() error {
 			dup = w.seen[idx].Swap(true)
 		}
 
-		w.st.recordDeliver(w.slot, delLatUs, dup)
+		w.st.recordDeliver(w.slot, seq, delLatUs, dup)
 
-		var ackLatUs float64
 		if w.ack {
 			t0 := time.Now()
 			if err := w.ch.Ack(d.DeliveryTag); err != nil {
 				return err
 			}
-			ackLatUs = float64(time.Since(t0).Nanoseconds()) / 1000
+			w.st.recordAck(seq, float64(time.Since(t0).Nanoseconds())/1000)
 		}
-		w.st.recordAck(ackLatUs)
 	}
 	return nil
 }

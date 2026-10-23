@@ -2,6 +2,8 @@ package bench
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -24,24 +26,24 @@ type Result struct {
 
 // Summary is the one-line JSON aggregate contract for Phase 4 gates.
 type Summary struct {
-	RunID   string `json:"runid"`
-	Config  any    `json:"config"`
+	RunID    string          `json:"runid"`
+	Config   any             `json:"config"`
 	Topology TopologySummary `json:"topology"`
 
-	Published  uint64  `json:"published"`
-	Delivered  uint64  `json:"delivered"`
-	Consumed   uint64  `json:"consumed"`
-	Duplicates uint64  `json:"duplicates"`
-	Drops      uint64  `json:"drops"`
-	ElapsedMs  int64   `json:"elapsed_ms"`
+	Published          uint64  `json:"published"`
+	Delivered          uint64  `json:"delivered"`
+	Consumed           uint64  `json:"consumed"`
+	Duplicates         uint64  `json:"duplicates"`
+	Drops              uint64  `json:"drops"`
+	ElapsedMs          int64   `json:"elapsed_ms"`
 	ConsumedRatePerSec float64 `json:"consumed_rate_per_s"`
 
 	DeliveryLatency LatencySummary `json:"delivery_latency_us"`
 	AckLatency      LatencySummary `json:"ack_latency_us"`
 
-	ByRole           map[string]RoleRow  `json:"by_role"`
-	ByConn           []ByConnRow         `json:"by_conn"`
-	ByPublishChannel []ByPubChRow        `json:"by_publish_channel"`
+	ByRole           map[string]RoleRow `json:"by_role"`
+	ByConn           []ByConnRow        `json:"by_conn"`
+	ByPublishChannel []ByPubChRow       `json:"by_publish_channel"`
 }
 
 type TopologySummary struct {
@@ -75,9 +77,24 @@ type ByPubChRow struct {
 	RatePerSec float64 `json:"rate_per_s"`
 }
 
-// newRunID mints a unique, short run identifier (base36 nanoseconds).
+var (
+	runIDSeq   atomic.Uint64
+	runIDNonce = func() string {
+		var b [8]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return strconv.FormatUint(uint64(os.Getpid()), 36)
+		}
+		return hex.EncodeToString(b[:])
+	}()
+)
+
+// newRunID mints a unique, short run identifier: base36 timestamp, an
+// in-process atomic sequence, and a per-process random nonce. The sequence
+// prevents concurrent collisions in one process; the nonce separates
+// concurrent processes that share a coarse clock.
 func newRunID() string {
-	return strconv.FormatInt(time.Now().UnixNano(), 36)
+	return strconv.FormatInt(time.Now().UnixNano(), 36) + "-" +
+		strconv.FormatUint(runIDSeq.Add(1), 36) + "-" + runIDNonce
 }
 
 // connectConfig reuses the locked params from the Phase 1 harness.
@@ -110,7 +127,7 @@ func Run(ctx context.Context, cfg *Config) (*Result, error) {
 	queue := "bench.q." + runid
 	routingKey := "bench.rk." + runid
 
-	openCtx, openCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	openCtx, openCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer openCancel()
 
 	// Setup client declares the uniquely-named fixture, then drops off. Unique
@@ -171,7 +188,11 @@ func Run(ctx context.Context, cfg *Config) (*Result, error) {
 			_ = csvFile.Close()
 		}
 	}()
-	csv := newCSVWriter(csvDst)
+	csv, err := newCSVWriter(csvDst)
+	if err != nil {
+		closeClients(clients)
+		return nil, fmt.Errorf("write CSV %s: %w", csvPath, err)
+	}
 
 	seq := atomic.Uint64{}
 	sentTimes := make([]atomic.Int64, total)
@@ -184,6 +205,7 @@ func Run(ctx context.Context, cfg *Config) (*Result, error) {
 			deliveries, err := sl.client.Consume(queue, openCtx)
 			if err != nil {
 				closeClients(clients)
+				cwg.Wait()
 				return nil, fmt.Errorf("consume conn %d ch %d: %w", sl.Conn, sl.Ch, err)
 			}
 			cw := &consumeWorker{
@@ -206,6 +228,10 @@ func Run(ctx context.Context, cfg *Config) (*Result, error) {
 	}
 
 	stopPub := make(chan struct{})
+	var stopOnce sync.Once
+	stopPubs := func() {
+		stopOnce.Do(func() { close(stopPub) })
+	}
 	var pwg sync.WaitGroup
 	for _, sl := range topo.publishCapable {
 		for range sl.PubGoroutines {
@@ -231,21 +257,44 @@ func Run(ctx context.Context, cfg *Config) (*Result, error) {
 		}
 	}
 
-	// Warmup: run the workers for -warmup, then discard all counts so the
-	// measured window starts clean. When warmup is zero no reset happens (the
-	// workers may already be recording, which is the measured phase).
-	if cfg.Warmup > 0 {
+	pubDone := make(chan struct{})
+	go func() {
+		pwg.Wait()
+		close(pubDone)
+	}()
+
+	shutdown := func() {
+		stopPubs()
+		pwg.Wait()
+		closeClients(clients)
+		cwg.Wait()
+	}
+
+	// Warmup is a real phase boundary: publishers keep running, but the cutoff
+	// is captured atomically with the counter reset. Messages allocated before
+	// the cutoff remain warmup traffic even if they are published or delivered
+	// afterwards. If the entire workload finished during warmup there can be no
+	// measured work, so fail clearly instead of returning an all-zero success.
+	if cfg.Warmup > 0 && total > 0 {
+		timer := time.NewTimer(cfg.Warmup)
 		select {
 		case <-ctx.Done():
-			close(stopPub)
-			pwg.Wait()
-			closeClients(clients)
-			cwg.Wait()
-			return nil, ctx.Err()
-		case <-time.After(cfg.Warmup):
+			timer.Stop()
+			shutdown()
+			return nil, fmt.Errorf("benchmark warmup interrupted: %w", ctx.Err())
+		case <-pubDone:
+			timer.Stop()
+			shutdown()
+			return nil, fmt.Errorf("warmup %v exceeded workload: all %d messages were published before measurement", cfg.Warmup, total)
+		case <-timer.C:
 		}
-		st.resetAll()
+		cutoff := st.beginMeasured(&seq)
+		if cutoff >= uint64(total) {
+			shutdown()
+			return nil, fmt.Errorf("warmup %v exceeded workload: all %d messages were published before measurement", cfg.Warmup, total)
+		}
 	}
+
 	sctx, sstop := context.WithCancel(context.Background())
 	defer sstop()
 
@@ -256,19 +305,29 @@ func Run(ctx context.Context, cfg *Config) (*Result, error) {
 		defer close(samplerDone)
 		ticker := time.NewTicker(cfg.Report)
 		defer ticker.Stop()
+		writeWindow := func(now time.Time) error {
+			if err := csv.writeInterval(st.sampleWindow(windowStart, now)); err != nil {
+				return err
+			}
+			if err := csv.flush(); err != nil {
+				return err
+			}
+			windowStart = now
+			if !cfg.Quiet {
+				logInterval(runid, st, windowStart)
+			}
+			return nil
+		}
 		for {
 			select {
 			case <-sctx.Done():
 				now := time.Now()
-				csv.writeInterval(st.sampleWindow(windowStart, now))
+				_ = csv.writeInterval(st.sampleWindow(windowStart, now))
 				_ = csv.flush()
 				return
 			case now := <-ticker.C:
-				csv.writeInterval(st.sampleWindow(windowStart, now))
-				_ = csv.flush()
-				windowStart = now
-				if !cfg.Quiet {
-					logInterval(runid, st, windowStart)
+				if err := writeWindow(now); err != nil {
+					return
 				}
 			}
 		}
@@ -276,21 +335,15 @@ func Run(ctx context.Context, cfg *Config) (*Result, error) {
 
 	// Measured phase: with -duration the publishers stop at the deadline; the
 	// run otherwise completes when every publisher goroutine has fired its msgs.
-	pubDone := make(chan struct{})
-	go func() {
-		pwg.Wait()
-		close(pubDone)
-	}()
-
 	if cfg.Duration > 0 {
 		timer := time.NewTimer(cfg.Duration)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			close(stopPub)
+			stopPubs()
 			<-pubDone
 		case <-timer.C:
-			close(stopPub)
+			stopPubs()
 			<-pubDone
 		case <-pubDone:
 			timer.Stop()
@@ -298,39 +351,52 @@ func Run(ctx context.Context, cfg *Config) (*Result, error) {
 	} else {
 		select {
 		case <-ctx.Done():
-			close(stopPub)
+			stopPubs()
 			<-pubDone
 		case <-pubDone:
 		}
 	}
 
-	// Drain: wait for the queue to empty (consumed == published) within the
-	// drain timeout. No-ack runs freeze at the prefetch ceiling and will time
-	// out here by design.
-	totalPublished := st.published.Load()
-	if cfg.Consumers > 0 && totalPublished > 0 {
-		deadline := time.Now().Add(cfg.DrainTimeout)
-		for st.consumed.Load() < totalPublished {
-			if !time.Now().Before(deadline) {
-				break
+	// Drain: acking runs wait for the whole queue (warmup included) so client
+	// shutdown cannot race an in-flight Ack. No-ack runs freeze at the prefetch
+	// ceiling and time out by design.
+	interrupted := ctx.Err() != nil
+	drainStart := time.Now()
+	if !interrupted && cfg.Consumers > 0 {
+		needDrain := false
+		if cfg.Ack {
+			needDrain = st.allPublished.Load() > 0
+		} else {
+			needDrain = st.published.Load() > 0
+		}
+		if needDrain {
+			deadline := time.Now().Add(cfg.DrainTimeout)
+			for !st.drained(cfg.Ack) {
+				if !time.Now().Before(deadline) {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					interrupted = true
+				case <-time.After(10 * time.Millisecond):
+				}
+				if interrupted {
+					break
+				}
 			}
-			select {
-			case <-ctx.Done():
-				deadline = time.Now() // bail out immediately
-			case <-time.After(10 * time.Millisecond):
+			if !interrupted && !st.drained(cfg.Ack) {
+				logf("benchmark %s: WARNING drain not complete after %v: consumed %d of %d published",
+					runid, time.Since(drainStart), st.consumed.Load(), st.published.Load())
 			}
 		}
 	}
-	if st.consumed.Load() < totalPublished {
-		logf("benchmark %s: WARNING drain not complete after %v: consumed %d of %d published",
-			runid, cfg.DrainTimeout, st.consumed.Load(), totalPublished)
-	}
-	if pub, con := st.published.Load(), st.consumed.Load(); pub > con {
-		st.drops.Store(pub - con)
+	if !interrupted {
+		if pub, con := st.published.Load(), st.consumed.Load(); pub > con {
+			st.drops.Store(pub - con)
+		}
 	}
 
-	closeClients(clients)
-	cwg.Wait()
+	shutdown()
 	sstop()
 	<-samplerDone
 
@@ -339,12 +405,26 @@ func Run(ctx context.Context, cfg *Config) (*Result, error) {
 	for err := range errCh {
 		errs = append(errs, err)
 	}
+
+	var csvErr error
+	if csv != nil {
+		csvErr = csv.close()
+	}
+	if csvFile != nil {
+		if err := csvFile.Close(); csvErr == nil {
+			csvErr = err
+		}
+		csvFile = nil
+	}
+
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("benchmark interrupted: %w", ctxErr)
+	}
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("worker failures: %w", errors.Join(errs...))
 	}
-
-	if csvFile != nil {
-		_ = csv.close()
+	if csvErr != nil {
+		return nil, fmt.Errorf("write CSV %s: %w", csvPath, csvErr)
 	}
 
 	return &Result{
@@ -421,8 +501,8 @@ func printPlan(w io.Writer, runid string, cfg *Config, t *Topology, total int) {
 	fmt.Fprintf(w, "benchmark %s: consume-capable(%d): %s\n", runid, len(t.consumeCapable), strings.Join(cons, ", "))
 }
 
-func exchangeOf(runid string) string { return "bench.ex." + runid }
-func queueOf(runid string) string     { return "bench.q." + runid }
+func exchangeOf(runid string) string   { return "bench.ex." + runid }
+func queueOf(runid string) string      { return "bench.q." + runid }
 func routingKeyOf(runid string) string { return "bench.rk." + runid }
 
 func summaryConfig(cfg *Config) map[string]any {
@@ -522,8 +602,8 @@ func buildSummary(runid string, cfg *Config, t *Topology, st *stats, phaseStart 
 	}
 
 	return Summary{
-		RunID:   runid,
-		Config:  summaryConfig(cfg),
+		RunID:  runid,
+		Config: summaryConfig(cfg),
 		Topology: TopologySummary{
 			Conns:          topoConns,
 			PublishCapable: len(t.publishCapable),

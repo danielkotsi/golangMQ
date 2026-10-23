@@ -1,6 +1,6 @@
 # BENCH-005: `-output -` mixes CSV and JSON in one stdout stream
 
-- **Status:** Open
+- **Status:** Fixed
 - **Severity:** Medium
 - **Component:** `cmd/benchmark/main.go`, `internal/bench/engine.go`
 - **Failing test:** `cmd/benchmark/main_test.go::TestFinding_Bench005_OutputDashMustNotMixStreams`
@@ -76,3 +76,9 @@ Choose and document one contract, then enforce it:
 
 The test currently accepts any outcome except both formats appearing together on
 stdout, so it supports whichever clean contract is chosen.
+
+## Resolution
+
+Fixed in `cmd/benchmark/main.go`. With `-output -`, the JSON summary is written to
+stderr while stdout remains a pure CSV stream. File-backed CSV runs still write
+the JSON summary to stdout.
