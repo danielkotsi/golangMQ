@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "name": "single-conn-baseline",
+      "description": "Minimal topology, sanity check",
+      "flags": [
+        "-conns", "1",
+        "-channels", "1",
+        "-publishers", "1",
+        "-consumers", "1",
+        "-msgs", "10000",
+        "-size", "64",
+        "-ack",
+        "-duration", "0",
+        "-warmup", "0s",
+        "-report", "1s"
+      ]
+    },
+    {
+      "name": "fanout-even-4x8",
+      "description": "Even distribution across 4 conns / 8 channels",
+      "flags": [
+        "-conns", "4",
+        "-channels", "8",
+        "-pub-channels", "4",
+        "-publishers", "16",
+        "-consumers", "16",
+        "-msgs", "5000",
+        "-size", "64",
+        "-ack",
+        "-duration", "0",
+        "-warmup", "0s",
+        "-report", "1s"
+      ]
+    },
+    {
+      "name": "mixed-roles",
+      "description": "Pub/cons/mixed conns with channel role carving",
+      "flags": [
+        "-conns", "6",
+        "-pub-conns", "2",
+        "-cons-conns", "2",
+        "-channels", "12",
+        "-pub-channels", "2",
+        "-cons-channels", "2",
+        "-publishers", "8",
+        "-consumers", "8",
+        "-msgs", "5000",
+        "-size", "64",
+        "-ack",
+        "-duration", "0",
+        "-warmup", "0s",
+        "-report", "1s"
+      ]
+    },
+    {
+      "name": "uneven-caps",
+      "description": "Uneven packing with caps",
+      "flags": [
+        "-conns", "3",
+        "-channels", "12",
+        "-distribution", "uneven",
+        "-max-channels-per-conn", "6",
+        "-publishers", "12",
+        "-consumers", "12",
+        "-msgs", "5000",
+        "-size", "64",
+        "-ack",
+        "-duration", "0",
+        "-warmup", "0s",
+        "-report", "1s"
+      ]
+    },
+    {
+      "name": "no-ack",
+      "description": "No ack path",
+      "flags": [
+        "-conns", "2",
+        "-channels", "4",
+        "-publishers", "8",
+        "-consumers", "8",
+        "-msgs", "10000",
+        "-size", "64",
+        "-ack=false",
+        "-duration", "0",
+        "-warmup", "0s",
+        "-report", "1s"
+      ]
+    }
+  ]
+}

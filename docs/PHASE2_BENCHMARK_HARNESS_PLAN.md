@@ -49,10 +49,12 @@ drive it as a function, not via CLI parsing.
 3. **`-channels`/`-pub-channels`/`-cons-channels` are TOTALS across the topology** (not
    "per connection"). The conns-axis distribution decides how those totals land on each
    connection. This makes `-max-channels-per-conn` a meaningful cap.
-4. **`-distribution even|uneven` is order-sensitive.** It binds to whichever of
-   `-conns` / `-channels` / `-pub-channels` immediately precedes it on the command line.
-   `even` = deterministic round-robin placement; `uneven` = packing (no cap → everything
-   into slot 0; with cap → fill slot 0 to the cap, then slot 1, …).
+4. **`-distribution even|uneven` is order-sensitive.** It binds to whichever countable
+   axis immediately precedes it on the command line: `-conns`, `-channels`,
+   `-pub-channels`, `-routing-keys`, `-queues`. `even` = deterministic balanced
+   placement; `uneven` = packing (no cap → everything into slot 0; with cap → fill slot 0
+   to the cap, then slot 1, …). `-exchanges` is **count-only** — it deliberately has NO
+   distribution axis (an exchange is stressed with 1 exchange; see decision 10).
 5. **Message loads are deterministic.** `even` assigns whole goroutines round-robin, so the
    message total per channel is exactly `(goroutines on channel) × -msgs` — no scheduling
    jitter in the per-channel totals. `uneven` packs the same way → one channel carries the
@@ -71,6 +73,22 @@ drive it as a function, not via CLI parsing.
 9. **CSV + JSON outputs.** CSV = per-interval series (plotting / Phase 4 golden files);
    JSON summary on stdout = machine-readable aggregates for Phase 4 gates. Both include the
    per-role, per-connection, and per-publish-channel decomposition.
+10. **Messaging objects are count + a bipartite binding.** `-exchanges`, `-routing-keys`,
+    `-queues` define the messaging topology. Only the **count** of exchanges matters
+    (stressing an exchange = run with `-exchanges 1`; key `k` derives onto exchange
+    `k % exchanges`). Keys and queues form a **bipartite binding graph** with two
+    independently-dialed degrees: the **key-degree** (how many queues a key fans into;
+    `-distribution` after `-routing-keys`, cap `-max-queues-per-key`) and the
+    **queue-degree** (how many keys feed a queue; `-distribution` after `-queues`, cap
+    `-max-keys-per-queue`). No single "fanout" flag.
+11. **Conflicting degree totals soften loudly.** When the two degree targets disagree
+    (`Σd_k ≠ Σe_q`), the axis with the larger total keeps its degrees; the smaller side
+    scales up proportionally, re-checked against its cap; any residual clamp/adjustment
+    emits an **explicit warning** (stderr + run header + `softened_bindings` in the JSON).
+    Realization is deterministic (index-ordered greedy fill).
+12. **Accounting is per key and per queue.** Publishing to key `k` produces one copy per
+    bound queue, so `consumed_total = Σ_k published_k × (queues bound to k)`. Duplicate
+    detection is per-queue (same seq redelivered on the *same* queue).
 
 ## Verified broker/SDK facts the design depends on
 
@@ -92,7 +110,7 @@ cmd/benchmark/
   main.go                 # flag parsing, order-sensitive distribution binding, validation, wiring
 internal/bench/
   config.go               # Config struct, flag.Value helpers, Validate()
-  topology.go             # role resolution + even/uneven placement (conns/channels/workers)
+  topology.go             # role resolution + even/uneven placement (conns/channels/workers) + key↔queue binding graph
   engine.go               # run(ctx, cfg): build topology, workers, drain, Summary
   worker.go               # publishWorker, consumeWorker, message header encode/decode
   metrics.go              # sampler, latency stats, per-role/conn/publish-channel split
@@ -143,6 +161,61 @@ guarantees each conn holds `floor` or `ceil` channels, no conn exceeds `ceil`, a
 conns may hold **zero** channels. Those conns still exist as SDK clients (open, idle) but
 host no channels; this is intentional — it keeps "one conn = one socket" accounting honest.
 
+### Messaging objects
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `-exchanges` | `1` | **count only**; key `k` derives onto exchange `k % exchanges`. No distribution axis. |
+| `-routing-keys` | `1` | distinct routing keys, named `bench.rk.<runid>.<k>` |
+| `-queues` | `1` | queues, named `bench.q.<runid>.<j>` |
+| `-max-queues-per-key` | `0` | key-axis cap: max queues one key may bind (needs `uneven`); `0` = no limit |
+| `-max-keys-per-queue` | `0` | queue-axis cap: max keys that may feed one queue (needs `uneven`); `0` = no limit |
+
+Declared named exports `bench.ex.<runid>.<e>` for `e in 0..exchanges-1`. Exchanges are
+**never distributed** — count only. A run with `-exchanges 1` is the exchange stress case
+(all keys land on one exchange).
+
+### Binding — bipartite key↔queue graph
+
+Two degrees, each dialed by its own `-distribution`:
+
+- **key-degree** `d_k` = number of queues key `k` binds to (how many queues one key fans
+  into) — `-distribution` after `-routing-keys`, cap `-max-queues-per-key`.
+- **queue-degree** `e_q` = number of keys that bind queue `q` (how many keys feed one
+  queue) — `-distribution` after `-queues`, cap `-max-keys-per-queue`.
+
+**Target degree sequences (deterministic):**
+- key-degree `even`: distribute the `-queues` slots as evenly as possible over the
+  `-routing-keys`, each key ≥ 1 while `queues ≥ routing-keys`:
+  `d_k = floor(Q/R) + (k < Q mod R ? 1 : 0)`, so `Σd_k = Q`.
+- queue-degree `even`: symmetric: `e_q = floor(R/Q) + (q < R mod Q ? 1 : 0)`, `Σe_q = R`.
+- key-degree `uneven` (no cap): key 0 binds **all** `Q` queues, keys 1..R-1 bind none
+  ("one key, many queues").
+- key-degree `uneven` with cap `C`: key 0 binds up to `C`, then key 1, …; **error** if
+  `Q > C × R` (can't fit).
+- queue-degree `uneven` (no cap): queue 0 is fed by **all** `R` keys ("one queue, many
+  keys").
+- queue-degree `uneven` with cap `C`: queue 0 bound by up to `C` keys, then queue 1, …;
+  **error** if `R > C × Q`.
+
+Any degree flagged for a cap while its axis is `even` → warning + ignored (same as
+topology caps).
+
+**Adaptive softening** when `Σd_k ≠ Σe_q`:
+1. The axis with the larger target total keeps its degrees exactly.
+2. The smaller side scales up proportionally (deterministic rounding), re-clamped by its cap.
+3. Residual mismatches are absorbed by deterministic rightmost-first reduction on the
+   primary side.
+4. Every step that alters a target emits an explicit `WARN` (stderr + run header +
+   `softened_bindings` array in JSON).
+
+Even/even with `routing-keys == queues` yields the invariant 1:1 graph
+(`d_k = e_q = 1`) with **no warnings**.
+
+**Realization (topology.go):** index-ordered greedy fill over the two degree sequences
+(Havel–Hakimi-style, ties broken by index) producing `Σd_k` edges `(k,q)`; verify both
+degree sequences post-hoc; failure = validation error naming the constraint clash.
+
 ### Distribution (order-sensitive)
 
 | Flag | Binds after | Governs | Cap (needs `uneven`) |
@@ -150,18 +223,27 @@ host no channels; this is intentional — it keeps "one conn = one socket" accou
 | `-distribution even\|uneven` | `-conns` | channel→connection placement | `-max-channels-per-conn` |
 | `-distribution even\|uneven` | `-channels` | consumer→channel placement | `-max-consumers-per-channel` |
 | `-distribution even\|uneven` | `-pub-channels` | publisher→channel placement | `-max-publishers-per-channel` |
+| `-distribution even\|uneven` | `-routing-keys` | key-degree: queues a key binds | `-max-queues-per-key` |
+| `-distribution even\|uneven` | `-queues` | queue-degree: keys feeding a queue | `-max-keys-per-queue` |
+
+`-exchanges` is **not** an axis — count only (decision 10).
 
 The **same** `-distribution` flag is registered once; a custom `flag.Value` is used. Because
 stdlib `flag` processes argv in order, each `-distribution` occurrence reads `lastAxis`,
-which `-conns` / `-channels` / `-pub-channels` set when they are parsed.
+which `-conns` / `-channels` / `-pub-channels` / `-routing-keys` / `-queues` set when they
+are parsed.
 
 **Mechanics:**
-- `-distribution` with no preceding `-conns`/`-channels`/`-pub-channels` → error.
-- `even`: round-robin (channel `i` → conn `i % conns`; worker `j` → slot `j % count`).
-- `uneven`, no cap: pack everything into slot 0.
+- `-distribution` with no preceding axis flag (`-conns`/`-channels`/`-pub-channels`/
+  `-routing-keys`/`-queues`) → error.
+- `even`: round-robin (channel `i` → conn `i % conns`; worker `j` → slot `j % count`;
+  degree targets as above for keys/queues).
+- `uneven`, no cap: pack everything into slot 0 (for keys/queues: one key binds all queues
+  / one queue is fed by all keys).
 - `uneven` with cap `C`: fill slot 0 to `C`, then slot 1, …; **validation error** if it
   cannot fit (e.g. `channels > conns×C`, `consumers > consumeCapable×C`,
-  `publishers > publishCapable×C`).
+  `publishers > publishCapable×C`, `queues > routingKeys×C` on the key axis,
+  `routingKeys > queues×C` on the queue axis).
 - A cap given while its axis is `even` → warning + ignored.
 
 ### Workload
@@ -188,12 +270,18 @@ which `-conns` / `-channels` / `-pub-channels` set when they are parsed.
 
 ## Placement rules (topology.go)
 
-Given conns, roles, and the three distribution axes, the builder produces a deterministic
-plan:
+Given conns, roles, messaging counts, and the five distribution axes, the builder produces
+a deterministic plan:
 
 ```
 type channelSlot struct { conn int; ch int; role Role; pubGoroutines []int; consGoroutines []int }
-type Topology struct { conns []connPlan; publishCapable []*channelSlot; consumeCapable []*channelSlot }
+type binding struct { key int; queue int }        // one directed key→queue edge
+type Topology struct {
+    conns []connPlan; publishCapable []*channelSlot; consumeCapable []*channelSlot
+    bindings []binding                            // key→queue edges (Σd_k of them)
+    keyQueues [][]int                             // per key, the bound queues (key-degree)
+    queueKeys [][]int                             // per queue, the feeding keys (queue-degree)
+}
 ```
 
 1. **channel→conn** via conns-axis mode:
@@ -204,11 +292,18 @@ type Topology struct { conns []connPlan; publishCapable []*channelSlot; consumeC
    `j` → slot `j % len(consumeCapable)`; `uneven` = pack. A slot may hold several consumers
    (multi-consumer per channel).
 4. **publisher→channel** via pub-channels-axis mode over `publishCapable`; same schema.
-5. **Message budget:** each publisher goroutine publishes exactly `-msgs` messages, so the
+5. **publisher→key (deterministic, NOT an axis):** publisher goroutine `j` publishes to key
+   `j % routing-keys`. The user asked no distribution axis here — only *how many* keys exist
+   and the key/queue degrees matter. `published_k = (count of publishers with j % R == k) × msgs`.
+6. **Message budget:** each publisher goroutine publishes exactly `-msgs` messages, so the
    deterministic per-channel publish load = `len(channel.pubGoroutines) × msgs`.
+7. **key→queue binding** via `buildBindings()` (see "Binding" section): compute target
+   degree sequences `d_k` / `e_q`, soften on mismatch with warnings, greedy-fill edges.
+   `consumed_target = Σ_k published_k × d_k`.
 
 The header (stderr) prints the full plan: per conn channel count/roles, per channel
-consumer & publisher goroutine counts, and the publish-capable list — so the run is
+consumer & publisher goroutine counts, the publish-capable list, plus the binding table
+(`key → [queues]`, `queue ← [keys]`) and any softening warnings — so the run is
 self-documenting and auditable (AGENTS.md audit-trail practice).
 
 ## Topology in practice — one fully worked example
@@ -255,28 +350,88 @@ Consumers (4, `even` over 2 slots): `j % 2` → ch4 gets j0+j2, ch5 gets j1+j3 �
 1 `B`; publish-capable = 5; consume-capable = 2; 2 consumers registered on ch4 and ch5 each;
 consumers never placed on conn0 (publish-only conn).
 
-The complete `-distribution` on the three axes is visible in this example: **conns** controls
-step 1, **channels** (consumers) and **pub-channels** (publishers) control step 4.
+The complete `-distribution` on the **topology axes** is visible in this example: **conns**
+controls step 1, **channels** (consumers) and **pub-channels** (publishers) control step 4.
+The two messaging axes (routing-keys, queues) are independent — see the next section. The
+three topology-layer axes are a superset of the whole flag set's five; a run that only sets
+topology flags uses the messaging defaults (1 exchange / 1 key / 1 queue, 1:1 binding).
+
+## Messaging in practice — binding examples
+
+Default (even/even, `key == queue` count): the 1:1 invariant, no warnings.
+
+```
+-routing-keys 4  -queues 4                        → k.i → q.i   (each d_k = e_q = 1)
+```
+
+**One queue fed by many keys — the queue-degree stress:**
+
+```
+-routing-keys 4  -queues 1  -distribution uneven -max-keys-per-queue 4
+```
+
+queue-degree `uneven`, no cap needed → `e_q0 = 4` (queue 0 fed by k0..k3); key-degree
+`even` target `d = [1,0,0,0]` (`Σ = Q = 1`) disagrees with the queue-side total
+(`Σ = R = 4`) → softening promotes the queue side and key degrees realize as
+`d = [1,1,1,1]`; a `WARN` is emitted. `consumed_target = published × 1` (each message has
+1 bound copy per key, regardless of which queue). Queue 0 drains 4 keys' traffic; compares
+with `-queues 4` (each queue fed by exactly 1 key).
+
+**One key fanning into many queues — the key-degree stress:**
+
+```
+-routing-keys 1  -queues 4  -distribution uneven -max-queues-per-key 4
+```
+
+key-degree `uneven` → `d_k0 = 4` (k0 binds q0..q3); queue-degree `even` target
+`e = [1,0,0,0]` (`Σ = R = 1`) disagrees (key-side total `Σ = Q = 4`) → key side stays
+primary, queue degrees realize as `[1,1,1,1]`; a `WARN` is emitted.
+`consumed_target = published × 4`.
+
+**Softening with warnings:**
+
+```
+-routing-keys 2  -queues 3  -distribution even   -distribution even
+```
+
+key-degree `even`: `d = [2,1]` (`Q mod R = 1` → key 0 gets the extra) → `Σ = 3`.
+queue-degree `even`: `e = [1,1,0]` (`R mod Q = 2` → queues 0,1 get the extra; queue 2 binds
+no key) → `Σ = 2`.
+**Mismatch** → key side is primary (total 3); queue degrees scale up to total 3, e.g.
+`[1,1,1]`; a `WARN` lists the adjustment. This run is legal but must print the softening
+warning (smoke-tested); realized graph = k0→q0,q1; k1→q2.
+
+```
+-routing-keys 2  -queues 1
+```
+
+Even small count asymmetries warn: key-degree `even`: `d = [1,0]` (only 1 queue slot to
+give, key 0 takes it) → `Σ = 1`. queue-degree `even`: `e = [2]` → `Σ = 2`. **Mismatch** →
+queue side is primary (total 2); key degrees soften to `[1,1]`; `WARN` emitted; realized
+graph = k0→q0, k1→q0 (both keys feed the single queue).
 
 ## Engine flow (engine.go)
 
 1. **Topology setup.** `runid := base36(time.Now().UnixNano())`. Declare
-   exchange `bench.ex.<runid>`, queue `bench.q.<runid>`, bind `bench.rk.<runid>` on a
-   short-lived setup client. Unique names → no cross-run interference.
+   `exchanges` named `bench.ex.<runid>.<e>`, `routingKeys` named `bench.rk.<runid>.<k>`,
+   `queues` named `bench.q.<runid>.<j>`, and bind every `(k,q)` edge from the binding graph
+   on a short-lived setup client. Unique names → no cross-run interference.
 2. **Instantiate topology**: `conns` SDK clients; per plan open channels; register consumer
-   goroutines on their slots; assign publisher goroutines to their slots.
+   goroutines on their slots; assign publisher goroutines to their slots (publisher `j` →
+   channel via the pub-channels axis, and → key `j % routing-keys`; see placement rules
+   step 5).
 3. **Warmup (optional):** run all workers for `-warmup`; discard counts; reset window.
 4. **Measured phase:**
-   - Publisher goroutines: mint seq globally, stamp `sentTimes[seq-1]`, `Publish`.
-   - Consumer goroutines: read per-consumer deliveries; decode header;
+   - Publisher goroutines: mint seq globally, stamp `sentTimes[seq-1]`, `Publish` to their
+     key. Consumers read per-consumer deliveries; decode header;
      `deliveryLatency = recv − sentTimes[seq-1]`; mark consumed; if `-ack`, time `Ack`,
      record ack latency. Immediately-read buffer keeps the SDK read-loop unblocked.
    - **Sampler** ticks at `-report`: snapshots counters + latency tails + per-role /
-     per-conn / per-publish-channel splits into an interval record, writes CSV, logs unless
-     `-quiet`.
+     per-conn / per-publish-channel / per-key / per-queue splits into an interval record,
+     writes CSV, logs unless `-quiet`.
 5. **Completion / drain.** Publishers finish → record publish-end; consumers run until
-   `consumed == total`, or `-duration` elapses then drain till quiet for `-drain-timeout`;
-   force-close (`client.Close()` is idempotent, unblocks readLoop).
+   `consumed == consumed_target`, or `-duration` elapses then drain till quiet for
+   `-drain-timeout`; force-close (`client.Close()` is idempotent, unblocks readLoop).
 6. **Summary → JSON on stdout.**
 
 ## Metrics (metrics.go)
@@ -286,15 +441,18 @@ recv, when acking), **publish latency** (local, enqueue+flush).
 
 Aggregates (whole run and per interval): count, msgs/sec, min/avg/max, p50/p95/p99.
 
-Counters: `published`, `delivered`, `consumed` (unique seqs), `duplicates` (redelivered
-seqs), `drops = total − consumed` after drain (0 in clean runs).
+Counters: `published`, `delivered` (copies out of queues), `consumed` (deliveries
+unique per queue), `duplicates` (seq redelivered on the same queue), `drops =
+consumed_target − consumed` after drain (0 in clean runs).
 
 **Decomposition (the point of the topology flags):**
 - delivery-latency percentiles **per channel role** (`both`, `cons-dedicated`) in CSV/JSON —
   mixed vs separated compared directly;
 - **per-connection rows** in JSON (delivered, consumed, pub_rate, avg delivery latency) —
   single-socket vs parallel sockets visible;
-- **per-publish-channel rate** — 1-channel vs N-channel hammering ceiling visible.
+- **per-publish-channel rate** — 1-channel vs N-channel hammering ceiling visible;
+- **per-routing-key and per-queue rows** in JSON (delivered, consumed, dup, avg delivery
+  latency) — one-key-many-queues / one-queue-many-keys probes compared directly.
 
 CSV columns (stable for Phase 4 diffing):
 
@@ -311,16 +469,31 @@ JSON summary shape (stdout, one line):
 
 ```json
 {
-  "runid": "...", "config": {...}, "topology": {"conns":[{"channels":4,"role":"pub"}],"publish_capable": 3, "consume_capable": 3},
-  "published": 0, "delivered": 0, "consumed": 0, "duplicates": 0, "drops": 0,
+  "runid": "...", "config": {...}, "topology": {"conns":[{"channels":4,"role":"pub"}],"publish_capable": 3, "consume_capable": 3, "exchanges": 3, "routing_keys": 6, "queues": 3, "bindings": [{"key":0,"queue":0},{"key":1,"queue":1},{"key":2,"queue":2},{"key":3,"queue":0}]},
+  "published": 0, "delivered": 0, "consumed": 0, "duplicates": 0, "drops": 0, "consumed_target": 0,
+  "softened_bindings": ["WARN ..."],
   "elapsed_ms": 0, "consumed_rate_per_s": 0.0,
   "delivery_latency_us": {"min":0,"avg":0,"max":0,"p50":0,"p95":0,"p99":0},
   "ack_latency_us": {"min":0,"avg":0,"max":0,"p50":0,"p95":0,"p99":0},
   "by_role": {"both":{"p95_us":0,"n":0},"cons":{"p95_us":0,"n":0}},
   "by_conn": [{"conn":0,"published":0,"consumed":0,"pub_rate_per_s":0.0,"avg_delivery_lat_us":0}],
-  "by_publish_channel": [{"conn":0,"ch":0,"published":0,"rate_per_s":0.0}]
+  "by_publish_channel": [{"conn":0,"ch":0,"published":0,"rate_per_s":0.0}],
+  "by_routing_key": [{"key":0,"published":0,"delivered":0,"consumed":0,"duplicates":0,"avg_delivery_lat_us":0}],
+  "by_queue": [{"queue":0,"consumed":0,"duplicates":0,"avg_delivery_lat_us":0}]
 }
 ```
+
+Note on counting with bindings:
+- `delivered` = copies routed out of the queues (a message published to key `k` yields `d_k`
+  copies — one per bound queue). Across queues the same seq appears multiple times: that is
+  **expected** fanout, not duplication.
+- `consumed` = delivered copies that were **unique on the delivery's queue** (the seq had
+  not been seen on that queue before).
+- `duplicates` = delivered copies whose seq was already consumed on the **same** queue
+  (redelivery) — the per-queue dup detector.
+- `drops = consumed_target − consumed` after drain (0 in clean runs), where
+  `consumed_target = Σ_k published_k × d_k`. Not `published − consumed` — that denominator
+  is wrong under fanout.
 
 ## Verification & definition of done
 
@@ -337,13 +510,23 @@ go test -race ./...    # includes bench smoke test
   (`pub-conns + cons-conns > conns`, carve > mixed slots, cap overflow) → `Validate` errors.
 - **placement**: `even` 4 consumers over 2 consume-capable slots → 2+2; `uneven` no cap →
   all in slot 0; capped → verified packing counts.
+- **binding**: `-routing-keys 4 -queues 4` even/even → 1:1 (`d_k = e_q = 1`), Σ matches Q,
+  no warnings; `-routing-keys 4 -queues 1` queue-uneven → `e_q0 = 4`, all keys bound to
+  queue 0; `-routing-keys 1 -queues 4` key-uneven → `d_k0 = 4`; cap overflow on either axis
+  → `Validate` error.
+- **softening**: `-routing-keys 2 -queues 3` even/even → mismatch produces
+  `WARN`/`softened_bindings`, realized edge set still satisfies the (softened) degree
+  targets, `consumed_target` recomputed from final graph.
+- **accounting**: fanout run delivers `consumed_target = published × d_k` total; per-queue
+  dup detection stays 0 on clean fanout; drops = `consumed_target − consumed`.
 - **same-queue multi-consumer on ONE channel** (4 consumers, 1 slot) — broker tolerance.
-- **1 channel vs N channels publish**: both runs deliver `total` messages, `drops == 0`,
-  assignment tables differ (all on one publish-capable slot vs spread).
+- **1 channel vs N channels publish**: both runs deliver `consumed_target` messages,
+  `drops == 0`, assignment tables differ (all on one publish-capable slot vs spread).
 - **mixed vs separated**: `-conns 2 -channels 2` (every conn both) vs
   `-conns 2 -pub-conns 1 -cons-conns 1 -channels 2`; assert by_role/by_conn rows present
   and consumers never appear on a publish-only conn (assignment check).
-- CSV header + ≥ 1 row on a tiny run; JSON totals match.
+- CSV header + ≥ 1 row on a tiny run; JSON totals match; `by_routing_key`/`by_queue` rows
+  match the binding graph.
 
 Manual acceptance runs (broker on `:5672` via `go run ./cmd/broker`):
 
@@ -366,6 +549,20 @@ go run ./cmd/benchmark -addr 127.0.0.1:5672 -conns 4 -channels 8 -publishers 8 -
 
 # no-ack observability of the prefetch stall (warning printed)
 go run ./cmd/benchmark -addr 127.0.0.1:5672 -ack=false -msgs 50
+
+# one queue fed by many keys (queue-degree) vs spread (by_queue/by_routing_key splits)
+go run ./cmd/benchmark -addr 127.0.0.1:5672 -routing-keys 4 -queues 1 \
+  -distribution uneven -max-keys-per-queue 4 -publishers 4 -consumers 2 -msgs 5000
+go run ./cmd/benchmark -addr 127.0.0.1:5672 -routing-keys 4 -queues 4 \
+  -publishers 4 -consumers 4 -msgs 5000
+
+# one key fanning into many queues (key-degree) — consumed_target = published × 4
+go run ./cmd/benchmark -addr 127.0.0.1:5672 -routing-keys 1 -queues 4 \
+  -distribution uneven -max-queues-per-key 4 -publishers 2 -consumers 4 -msgs 5000
+
+# softening example — degrees disagree, expect WARN + softened_bindings in JSON
+go run ./cmd/benchmark -addr 127.0.0.1:5672 -routing-keys 2 -queues 3 \
+  -distribution even -distribution even -publishers 2 -consumers 3 -msgs 5000
 ```
 
 Exit codes: `0` success; `1` runtime/engine error; `2` flag-parse error.
@@ -384,15 +581,26 @@ Exit codes: `0` success; `1` runtime/engine error; `2` flag-parse error.
 - **Fire-and-forget ack/confirm**: latency numbers are client-side, reproducible, relative.
 - **Cap flags with `even`** are ignored with a warning — a cap only says something under
   packing, and silent semantics are worse than loud warnings.
+- **Degree softening** can silently shape the graph if it only warned on stderr; every
+  softened step is therefore also recorded in the run header and `softened_bindings` JSON so
+  golden-file diffs (Phase 4) can't misinterpret the (adjusted) targets.
+- **Drops definition is per-key-weighted**: with uneven fanout, `drops` compares against
+  `consumed_target = Σ_k published_k × d_k`, NOT `published`. Misreading this is the #1
+  reporting pitfall (assertion + docs).
+- **Exchange count is derived (`key % exchanges`)**: there is no "publish to exchange N
+  only" flag; to stress one exchange use `-exchanges 1`. This is a deliberate scope cut.
 
 ## Suggested implementation order
 
 1. `internal/bench/config.go` — Config, order-sensitive `flag.Value` helpers, `Validate()`.
-2. `internal/bench/topology.go` — role resolution + placement; unit-assert its math first
-   (this is the trickiest, most flag-dependent piece).
-3. `internal/bench/worker.go` + `engine.go` — minimal single-conn path.
+2. `internal/bench/topology.go` — role resolution + placement + `buildBindings` (two-degree
+   targets, adaptive softening with warnings, index-ordered greedy fill); unit-assert its
+   math first (this is the trickiest, most flag-dependent piece).
+3. `internal/bench/worker.go` + `engine.go` — minimal single-conn path (include
+   `consumed_target` from the binding graph).
 4. `internal/bench/metrics.go` + `csv.go` — decomposition + stable columns.
-5. `cmd/benchmark/main.go` — flag wiring, JSON summary, exit codes.
+5. `cmd/benchmark/main.go` — flag wiring, JSON summary (`by_routing_key`/`by_queue`/
+   `softened_bindings`), exit codes.
 6. `internal/bench/bench_smoke_test.go`; green `go build` / `go vet` / `go test` /
    `go test -race ./...`.
 7. Manual acceptance runs above; sanity-check CSV columns, JSON splits, and warnings.
