@@ -9,6 +9,7 @@ A lightweight, in-memory message broker written in Go, implementing a custom JSO
 - **Ack/Nack support** — consumer acknowledgment with requeue or dead-letter routing
 - **Dead-letter queues** — nack'd messages route to a DLX exchange and DLQ 
 - **Prefetch-based flow control** — inflight message tracking per consumer
+- **Prometheus metrics & Grafana dashboards** — built-in observability (see below)
 
 ## Architecture
 
@@ -37,7 +38,7 @@ Each TCP connection supports multiple logical channels. Frames are wrapped in an
 ### 1. Start the broker
 
 ```bash
-podman run -it -p 5672:5672 danielkotsi/golangmq:latest
+go run ./cmd/broker
 ```
 
 You should see:
@@ -79,23 +80,6 @@ go run exampleClients/publisher/main.go
 ```
 
 Watch the consumer terminal — messages flow through, nack'd ones land in the DLQ. Run the publisher as many times as you like to keep feeding messages.
-
-## Kubernetes in Docker (Kind)
-
-Run the broker inside a local Kind cluster:
-
-```bash
-# 1. Create the cluster with port mapping
-kind create cluster --config kind-config.yaml
-
-# 2. Deploy the broker
-kubectl apply -f deployment.yaml
-
-# 3. Expose via NodePort
-kubectl apply -f service.yaml
-```
-
-Connect using `localhost:30067` — the Kind node maps `30067` to the service's NodePort, which forwards to port `5672` on the pod.
 
 ## SDK Usage
 
@@ -148,44 +132,81 @@ err = channel.Publish(protocol.Publish{
 
 ```go
 incoming, err := channel.Consume("email_queue", ctx)
-
-for msg := range incoming {
-    log.Println("Received:", string(msg.Body))
-    channel.Ack(msg.DeliveryTag)
-}
 ```
 
-## Protocol
+## Observability (Prometheus & Grafana)
 
-Custom JSON-over-TCP protocol with newline-delimited framing. Handshake mirrors AMQP 0-9-1:
+The broker exposes Prometheus metrics and ships with Grafana provisioning for live monitoring.
 
+- **Metrics endpoint**: Broker exposes `/metrics` (configurable via flags/env). Key metrics include `golangmq_publish_total`, `golangmq_enqueue_total`, `golangmq_deliver_total`, `golangmq_ack_total`, `golangmq_nack_total`, `golangmq_dead_letter_total`, `golangmq_drop_total`, `golangmq_queue_messages`, `golangmq_queue_consumers`, `golangmq_consumer_inflight`, plus connection/consumer counters and Go/process collectors.
+- **Prometheus**: `prometheus.yml` is provided for scraping the broker.
+- **Grafana**: Dashboards and provisioning live under `grafana/` (`grafana/provisioning/`, `grafana/dashboards/`). The overview dashboard tracks connections/queues/exchanges/consumers, publish/deliver rates, queue depth, ack/nack rates, errors/DLQ/drops, consumers/inflight, and connections/errors.
+- **Docs**: See [`docs/observability/`](docs/observability/) for plans, step-by-step setup, and [`docs/observability/OBSERVABILITY_STATUS.md`](docs/observability/OBSERVABILITY_STATUS.md) for current status and known gaps.
+
+## Benchmarking
+
+### Benchmark CLI
+The repo includes a purpose-built benchmarking CLI at `cmd/benchmark` with a topology-aware harness (`internal/bench/`). It supports:
+- Deterministic topology resolution (connections/channels/roles, publish/consume-capable sets)
+- Order-sensitive distribution flags (`-conns`, `-channels`, `-pub-channels` with `-distribution even|uneven` and caps)
+- Publisher/consumer goroutines, message size/ack control, warmup, duration-based runs with drain
+- Per-interval CSV sampling and JSON summary output
+
+### Running scenarios
+Use the reusable runner script:
+
+```bash
+# Run all scenarios from a scenarios JSON
+./scripts/run_baseline.sh scenarios/baseline.json
+
+# Run a specific scenario
+./scripts/run_baseline.sh scenarios/baseline.json -n single-conn-baseline
+
+# Reuse an existing broker or use a custom address
+./scripts/run_baseline.sh scenarios/baseline.json --addr 127.0.0.1:5672
+./scripts/run_baseline.sh scenarios/baseline.json --no-start-broker
 ```
-Client → Server:  GOMQ/1\n
-Server → Client:  connection.start
-Client → Server:  connection.start_ok
-Server → Client:  connection.tune
-Client → Server:  connection.tune_ok
-Client → Server:  connection.open
-Server → Client:  connection.open_ok
+
+Scenario definitions live in `scenarios/` (e.g. `scenarios/baseline.json`, `scenarios/scenario.json`). See [`scenarios/README.md`](scenarios/README.md) and [`scenarios/baseline-scenarios.md`](scenarios/baseline-scenarios.md) for details on flags and topology rules.
+
+### Results location
+Results are saved under:
 ```
+results/baselines/<git-sha-short>/<scenario-set>/<timestamp>/
+├── manifest.json   # commit, env, broker config, scenarios file, filter, broker reuse info
+├── <scenario>.csv  # interval samples (per -report)
+└── <scenario>.json # pretty-printed summary (totals, rates, latencies, topology)
+```
+Each run creates a new timestamped directory. The runner can reuse an existing broker (and will not kill it unless it started it).
 
-**Method types:**
+### Current broker performance (1M msg, 3 fresh-broker runs)
+Based on [`docs/benchmark-1m-3runs-experiment.md`](docs/benchmark-1m-3runs-experiment.md) (all scenarios: published=consumed=1,000,000, drops=0, duplicates=0):
 
-| Category   | Methods                                                                 |
-|------------|-------------------------------------------------------------------------|
-| Basic      | `basic.publish`, `basic.deliver`, `basic.consume`, `basic.ack`, `basic.nack` |
-| Channel    | `channel.open`, `channel.open-ok`, `channel.close`, `channel.close-ok` |
-| Queue      | `queue.declare`, `queue.declare-ok`, `queue.bind`, `queue.bind-ok`    |
-| Exchange   | `exchange.declare`, `exchange.declare-ok`                              |
-| Error      | `error`                                                                 |
+| Scenario | Topology (conns/pubs/cons) | Msgs/publisher | Mean throughput (msg/s) | Rate CV | Delivery p95 | Notes |
+|---|---|---|---|---|---|---|
+| `01-baseline` | 1 mixed / 1 / 1 | 1,000,000 | ~9,145 | 3.4% | 64.0–72.3 s | Reference (single consumer bottleneck) |
+| `02-publishers-up` | 1 mixed / 64 / 1 | 15,625 | ~9,893 | 3.9% | 83.7–91.0 s | Consumer bottleneck confirmed (more pubs don't help) |
+| `03-consumers-up` | 1 mixed / 1 / 64 | 1,000,000 | ~16,310 | 1.1% | 0.15–0.67 s | Publisher bottleneck confirmed (queue stays short) |
+| `04-both-up` | 1 mixed / 64 / 64 | 15,625 | ~17,362 | 0.7% | 43.3–45.5 s | Shared single connection/channel contention |
+| `05-publisher-conns-up` | 16 pub + 1 cons / 64 / 64 | 15,625 | ~18,508 | 0.7% | 47.0–48.8 s | Extra pub conns help little (consumer conn limits) |
+| `06-consumer-conns-up` | 1 pub + 16 cons / 64 / 64 | 15,625 | ~32,770 | 4.2% | 14.8–15.3 s | Consumer connections help significantly |
+| `07-both-conns-up` | 16 pub + 16 cons / 64 / 64 | 15,625 | ~29,625 | 4.9% | 27.2–30.4 s | Broker contention (single exchange/queue) reduces gains |
 
-## Technical Stack
+**Bottlenecks verified:** single consumer is the limit when overloaded (02), single publisher limits when consumers are plentiful (03), one consumer connection is a major constraint (05), and adding connections on both sides creates contention on the single queue/dispatch path (07 drops vs 06). Delivery p95 includes queue wait time (backlog), not just broker latency.
 
-| Component       | Implementation                                  |
-|-----------------|--------------------------------------------------|
-| Language        | Go 1.22                                          |
-| Concurrency     | goroutines, channels, `sync.Cond`, `sync.Once`  |
-| Wire format     | JSON + newline-delimited framing                 |
-| Transport       | TCP                                              |
-| Container       | Multi-stage Docker (Alpine 3.19, ~15MB)          |
-| Channel IDs     | uint16 (up to 65535 channels per connection)     |
+## Ongoing Work & Planned Improvements
+
+- **Standardize baseline scenarios for CI regression tests**: Turn the experiment scenarios into stable, reusable baselines in `scenarios/` and wire them into CI with regression gates (e.g. fail if throughput drops >10–15%, with wider tolerances for noisy p95/ack metrics).
+- **Cover untested dimensions**: The 1M experiment did **not** vary the **number of queues**. Testing multiple queues/routing patterns may reveal different bottlenecks and behaviors (dispatch fairness, lock contention).
+- **Explore sustained-duration benchmarks**: Add rate-limited publishers and `-duration`-based sustained runs to expose publisher saturation more clearly (some bursty cases hide it).
+- **Observability polish**: Add "Total Backlog = queue_messages + sum(consumer_inflight)" panels, message age/oldest-message metrics, queue/exchange template variables, and Go runtime panels. See [`docs/observability/OBSERVABILITY_STATUS.md`](docs/observability/OBSERVABILITY_STATUS.md).
+- **Clean Docker Compose stack**: Add a root `docker-compose.yml` to run broker, Prometheus, and Grafana together with proper provisioning, networking/port alignment, and healthchecks (see Docker requirements in [`docs/observability/OBSERVABILITY_STATUS.md`](docs/observability/OBSERVABILITY_STATUS.md)).
+- **Metrics test coverage**: Add tests that assert metric values increase after publish/consume cycles to close observability verification.
+- **Handle tag space & edge cases**: Continue investigating uint16 delivery-tag wraparound behavior under high backlog (warned by benchmark in large runs).
+
+## Tests
+
+```bash
+go test ./...
+go test -race ./...
+```
