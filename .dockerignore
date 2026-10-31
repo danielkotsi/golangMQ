@@ -1,0 +1,20 @@
+# VCS & local tooling
+.git/
+.gitignore
+.commandcode/
+
+# Build output & generated artifacts
+bin/
+results/
+*.csv
+
+# Docs, investigation notes & manifests shipped outside the image
+# (compose mounts prometheus.yml and grafana/ from the host, they are not baked in)
+docs/
+findings/
+*.md
+deployment.yaml
+service.yaml
+kind-config.yaml
+prometheus.yml
+grafana/

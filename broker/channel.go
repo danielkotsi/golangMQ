@@ -4,6 +4,7 @@ import (
 	"GolangRabbitMQBroker/protocol"
 	"encoding/json"
 	"log"
+	"strconv"
 )
 
 type Channel struct {
@@ -15,7 +16,7 @@ type Channel struct {
 
 func (ch *Channel) cleanup() {
 	for _, consumer := range ch.consumers {
-		consumer.queue.unregisterConsumer(consumer.tag)
+		consumer.queue.unregisterConsumer(consumer)
 	}
 }
 
@@ -127,16 +128,24 @@ func (ch *Channel) HandleNack(env protocol.Envelope) {
 			continue
 		}
 
+		queue := consumer.queue.name
+		b := ch.broker
+
+		b.metrics.Nacked.WithLabelValues(queue, strconv.FormatBool(requeue)).Inc()
+
 		if requeue {
 			consumer.queue.mu.Lock()
 			consumer.queue.messages = append([]Message{msg}, consumer.queue.messages...)
 			consumer.queue.mu.Unlock()
 		} else if consumer.queue.dlx != "" {
+			b.metrics.DeadLettered.WithLabelValues(queue).Inc()
 			routingKey := consumer.queue.dlxRoutingKey
 			if routingKey == "" {
 				routingKey = msg.RoutingKey
 			}
 			ch.broker.Publish(consumer.queue.dlx, routingKey, msg.Body)
+		} else {
+			b.metrics.Dropped.WithLabelValues(queue).Inc()
 		}
 
 		consumer.queue.cond.Signal()
