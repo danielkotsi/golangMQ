@@ -138,8 +138,23 @@ incoming, err := channel.Consume("email_queue", ctx)
 
 The broker exposes Prometheus metrics and ships with Grafana provisioning for live monitoring.
 
+### Quick start (docker compose)
+
+Bring the whole stack up — broker, Prometheus, and Grafana, fully provisioned:
+
+```bash
+docker compose up -d --build
+```
+
+- **Broker** (GOMQ/1): `localhost:5672`
+- **Broker metrics** (ad-hoc curl): `http://localhost:9091/metrics`
+- **Prometheus**: http://localhost:9090 — scrapes the broker at `broker:9090` over the compose network
+- **Grafana**: http://localhost:3000 — dashboard "GolangMQ / GolangMQ Overview", anonymous viewer access
+
+Tear down with `docker compose down` (add `-v` to also drop the Prometheus/Grafana data volumes). See [`docs/observability/OBSERVABILITY_STATUS.md`](docs/observability/OBSERVABILITY_STATUS.md) for the full setup and known gaps.
+
 - **Metrics endpoint**: Broker exposes `/metrics` (configurable via flags/env). Key metrics include `golangmq_publish_total`, `golangmq_enqueue_total`, `golangmq_deliver_total`, `golangmq_ack_total`, `golangmq_nack_total`, `golangmq_dead_letter_total`, `golangmq_drop_total`, `golangmq_queue_messages`, `golangmq_queue_consumers`, `golangmq_consumer_inflight`, plus connection/consumer counters and Go/process collectors.
-- **Prometheus**: `prometheus.yml` is provided for scraping the broker.
+- **Prometheus**: `prometheus.yml` scrapes the broker at `broker:9090` inside the compose network.
 - **Grafana**: Dashboards and provisioning live under `grafana/` (`grafana/provisioning/`, `grafana/dashboards/`). The overview dashboard tracks connections/queues/exchanges/consumers, publish/deliver rates, queue depth, ack/nack rates, errors/DLQ/drops, consumers/inflight, and connections/errors.
 - **Docs**: See [`docs/observability/`](docs/observability/) for plans, step-by-step setup, and [`docs/observability/OBSERVABILITY_STATUS.md`](docs/observability/OBSERVABILITY_STATUS.md) for current status and known gaps.
 
@@ -200,7 +215,7 @@ Based on [`docs/benchmark-1m-3runs-experiment.md`](docs/benchmark-1m-3runs-exper
 - **Cover untested dimensions**: The 1M experiment did **not** vary the **number of queues**. Testing multiple queues/routing patterns may reveal different bottlenecks and behaviors (dispatch fairness, lock contention).
 - **Explore sustained-duration benchmarks**: Add rate-limited publishers and `-duration`-based sustained runs to expose publisher saturation more clearly (some bursty cases hide it).
 - **Observability polish**: Add "Total Backlog = queue_messages + sum(consumer_inflight)" panels, message age/oldest-message metrics, queue/exchange template variables, and Go runtime panels. See [`docs/observability/OBSERVABILITY_STATUS.md`](docs/observability/OBSERVABILITY_STATUS.md).
-- **Clean Docker Compose stack**: Add a root `docker-compose.yml` to run broker, Prometheus, and Grafana together with proper provisioning, networking/port alignment, and healthchecks (see Docker requirements in [`docs/observability/OBSERVABILITY_STATUS.md`](docs/observability/OBSERVABILITY_STATUS.md)).
+- **Clean Docker Compose stack**: ✅ Root `docker-compose.yml` runs broker, Prometheus, and Grafana together with provisioning, healthchecks, and aligned ports/network. See [`docs/observability/OBSERVABILITY_STATUS.md`](docs/observability/OBSERVABILITY_STATUS.md) for the remaining observability gaps.
 - **Metrics test coverage**: Add tests that assert metric values increase after publish/consume cycles to close observability verification.
 - **Handle tag space & edge cases**: Continue investigating uint16 delivery-tag wraparound behavior under high backlog (warned by benchmark in large runs).
 

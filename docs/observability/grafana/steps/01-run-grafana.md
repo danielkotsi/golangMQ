@@ -3,6 +3,12 @@
 > Part of [GRAFANA_PLAN.md](../GRAFANA_PLAN.md) §3.1.
 > Execution order: **you are here** → [Step 2](02-datasource-provisioning.md) → [Step 3](03-dashboard-provisioning.md) → [Step 4](04-explore-choose-save-queries.md) → [Step 5](05-verification.md)
 
+> **Preferred path:** `docker compose up -d --build` from the repo root brings this whole
+> stack up fully wired (see [README › Observability](../../../../README.md#observability-prometheus--grafana)).
+> The manual commands below apply when you run the broker on the host; they require a
+> `prometheus.yml` override targeting `host.docker.internal:9091`, because the committed
+> `prometheus.yml` now targets the compose service `broker:9090`.
+
 ## Goal
 
 Run Prometheus and Grafana side by side in docker so Grafana can consume the broker

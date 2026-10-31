@@ -11,6 +11,15 @@ as code → Explore queries → Save the first chosen panels → Verify live.
 > the "explore → export → commit" workflow. Which specific metrics/queries we want
 > to represent is decided later, inside that workflow.
 
+> **Superseded by `docker-compose.yml` (recommended).** The repo now ships a root
+> [`docker-compose.yml`](../../../docker-compose.yml) that runs broker + Prometheus +
+> Grafana together, fully provisioned — see
+> [README › Observability](../../../README.md#observability-prometheus--grafana).
+> The manual `docker run` steps below are kept for the host-run-broker variant; that
+> flow reaches the broker over `host.docker.internal` and therefore needs a local
+> `prometheus.yml` override (target `host.docker.internal:9091`), because the committed
+> `prometheus.yml` now targets the compose service `broker:9090`.
+
 ---
 
 ## 0. Current state (baseline)
@@ -64,8 +73,9 @@ localhost:3000   Grafana (docker)   ─┘ url http://host.docker.internal:9090
    - **The "which queries we save" question === which panels we commit into
      `grafana/dashboards/`.** Nothing is stored only inside Grafana's DB.
 
-4. **Orchestration:** no compose file — manual `docker run` commands, matching how
-   Prometheus is already run for the dev demo.
+4. **Orchestration:** a root `docker-compose.yml` now runs the full stack
+   (broker + Prometheus + Grafana) with provisioning and healthchecks. The manual
+   `docker run` commands in this plan remain as the host-run-broker variant.
 
 5. **No Go code changes** in this step — ops config + docs only.
 
