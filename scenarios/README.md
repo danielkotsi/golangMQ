@@ -72,3 +72,22 @@ Create a new JSON file (e.g. `scenarios/mytest.json`) with:
 Run with `./scripts/run_baseline.sh scenarios/mytest.json`. Results will go under `results/baselines/<sha>/mytest/<timestamp>/`.
 
 For flag details and topology rules, see [baseline-scenarios.md](baseline-scenarios.md).
+
+## Broker reuse / custom address
+
+The runner can reuse an existing broker or use a custom address:
+
+```bash
+# Use a custom address
+./scripts/run_baseline.sh scenarios/baseline.json --addr 127.0.0.1:5672
+
+# Require an existing broker (don't start one)
+./scripts/run_baseline.sh scenarios/baseline.json --no-start-broker
+
+# Via environment variable
+BENCH_BROKER_ADDR=127.0.0.1:5672 ./scripts/run_baseline.sh scenarios/baseline.json
+```
+
+- If a broker is already listening on the target address, the runner will **reuse it** and will **not** kill it on exit.
+- If none is found and `--no-start-broker` is not set, the runner starts `bin/benchbroker` and kills it only if it started it.
+- The manifest records `broker_addr`, `broker_started_by_us`, and `broker_pid` for provenance.

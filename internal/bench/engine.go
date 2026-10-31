@@ -305,26 +305,31 @@ func Run(ctx context.Context, cfg *Config) (*Result, error) {
 		defer close(samplerDone)
 		ticker := time.NewTicker(cfg.Report)
 		defer ticker.Stop()
-		writeWindow := func(now time.Time) error {
-			if err := csv.writeInterval(st.sampleWindow(windowStart, now)); err != nil {
-				return err
-			}
-			if err := csv.flush(); err != nil {
-				return err
-			}
-			windowStart = now
-			if !cfg.Quiet {
-				logInterval(runid, st, windowStart)
-			}
-			return nil
+	writeWindow := func(now time.Time) error {
+		rec := st.sampleWindow(windowStart, now)
+		if err := csv.writeInterval(rec); err != nil {
+			return err
 		}
+		if err := csv.flush(); err != nil {
+			return err
+		}
+		if !cfg.Quiet {
+			logInterval(runid, rec)
+		}
+		windowStart = now
+		return nil
+	}
 		for {
 			select {
-			case <-sctx.Done():
-				now := time.Now()
-				_ = csv.writeInterval(st.sampleWindow(windowStart, now))
-				_ = csv.flush()
-				return
+		case <-sctx.Done():
+			now := time.Now()
+			rec := st.sampleWindow(windowStart, now)
+			_ = csv.writeInterval(rec)
+			_ = csv.flush()
+			if !cfg.Quiet {
+				logInterval(runid, rec)
+			}
+			return
 			case now := <-ticker.C:
 				if err := writeWindow(now); err != nil {
 					return
@@ -464,15 +469,9 @@ func logf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
 
-func logInterval(runid string, st *stats, windowStart time.Time) {
-	rec := intervalRecord{
-		Published:  st.pubW.Load(),
-		Delivered:  st.delW.Load(),
-		Consumed:   st.consW.Load(),
-		Duplicates: st.dupW.Load(),
-	}
+func logInterval(runid string, rec intervalRecord) {
 	logf("benchmark %s: interval t=%s published=%d delivered=%d consumed=%d dup=%d",
-		runid, windowStart.Format("15:04:05.000"), rec.Published, rec.Delivered, rec.Consumed, rec.Duplicates)
+		runid, rec.TsStart.Format("15:04:05.000"), rec.Published, rec.Delivered, rec.Consumed, rec.Duplicates)
 }
 
 func printPlan(w io.Writer, runid string, cfg *Config, t *Topology, total int) {

@@ -150,7 +150,7 @@ func (c *stateCollector) Collect(ch chan<- prometheus.Metric) {
 		q.mu.Lock()
 		ch <- prometheus.MustNewConstMetric(queueMessagesDesc, prometheus.GaugeValue, float64(len(q.messages)), q.name)
 		ch <- prometheus.MustNewConstMetric(queueConsumersDesc, prometheus.GaugeValue, float64(len(q.consumers)), q.name)
-		for _, consumer := range q.consumers {
+		for consumer := range q.consumers {
 			consumer.mu.Lock()
 			ch <- prometheus.MustNewConstMetric(consumerInflightDesc, prometheus.GaugeValue, float64(consumer.inflight), q.name, consumer.tag)
 			consumer.mu.Unlock()

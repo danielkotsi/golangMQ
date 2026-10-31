@@ -26,7 +26,7 @@
         "-pub-channels", "4",
         "-publishers", "16",
         "-consumers", "16",
-        "-msgs", "5000",
+        "-msgs", "10000",
         "-size", "64",
         "-ack",
         "-duration", "0",

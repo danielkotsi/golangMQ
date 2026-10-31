@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "name": "01-baseline",
+      "description": "Reference topology: 1 mixed connection, 1 channel, 1 publisher, 1 consumer. Constant workload across all scenarios: 1000000 total messages, 64 bytes each.",
+      "flags": [
+        "-conns", "1",
+        "-channels", "1",
+        "-publishers", "1",
+        "-consumers", "1",
+        "-msgs", "1000000",
+        "-size", "64",
+        "-ack",
+        "-duration", "0",
+        "-warmup", "0s",
+        "-drain-timeout", "5m",
+        "-report", "1s"
+      ]
+    },
+    {
+      "name": "02-publishers-up",
+      "description": "Increase publishers only: 64 publishers, 1 consumer, still 1 mixed connection/channel. Publisher side is over-provisioned, so the single consumer/connection is the expected bottleneck.",
+      "flags": [
+        "-conns", "1",
+        "-channels", "1",
+        "-publishers", "64",
+        "-consumers", "1",
+        "-msgs", "15625",
+        "-size", "64",
+        "-ack",
+        "-duration", "0",
+        "-warmup", "0s",
+        "-drain-timeout", "5m",
+        "-report", "1s"
+      ]
+    },
+    {
+      "name": "03-consumers-up",
+      "description": "Increase consumers only: 64 consumers, 1 publisher, still 1 mixed connection/channel. Consumer side is over-provisioned, so the single publisher/connection is the expected bottleneck.",
+      "flags": [
+        "-conns", "1",
+        "-channels", "1",
+        "-publishers", "1",
+        "-consumers", "64",
+        "-msgs", "1000000",
+        "-size", "64",
+        "-ack",
+        "-duration", "0",
+        "-warmup", "0s",
+        "-drain-timeout", "5m",
+        "-report", "1s"
+      ]
+    },
+    {
+      "name": "04-both-up",
+      "description": "Increase both publishers and consumers: 64 publishers and 64 consumers on 1 mixed connection/channel. The single connection/channel is the expected bottleneck.",
+      "flags": [
+        "-conns", "1",
+        "-channels", "1",
+        "-publishers", "64",
+        "-consumers", "64",
+        "-msgs", "15625",
+        "-size", "64",
+        "-ack",
+        "-duration", "0",
+        "-warmup", "0s",
+        "-drain-timeout", "5m",
+        "-report", "1s"
+      ]
+    },
+    {
+      "name": "05-publisher-conns-up",
+      "description": "Keep 64 publishers and 64 consumers, increase connections for publishers only: 16 publish-only connections/channels and 1 consume-only connection/channel. Consumer connection/channel is the expected bottleneck.",
+      "flags": [
+        "-conns", "17",
+        "-pub-conns", "16",
+        "-cons-conns", "1",
+        "-channels", "17",
+        "-publishers", "64",
+        "-consumers", "64",
+        "-msgs", "15625",
+        "-size", "64",
+        "-ack",
+        "-duration", "0",
+        "-warmup", "0s",
+        "-drain-timeout", "5m",
+        "-report", "1s"
+      ]
+    },
+    {
+      "name": "06-consumer-conns-up",
+      "description": "Keep 64 publishers and 64 consumers, increase connections for consumers only: 1 publish-only connection/channel and 16 consume-only connections/channels. Publisher connection/channel is the expected bottleneck.",
+      "flags": [
+        "-conns", "17",
+        "-pub-conns", "1",
+        "-cons-conns", "16",
+        "-channels", "17",
+        "-publishers", "64",
+        "-consumers", "64",
+        "-msgs", "15625",
+        "-size", "64",
+        "-ack",
+        "-duration", "0",
+        "-warmup", "0s",
+        "-drain-timeout", "5m",
+        "-report", "1s"
+      ]
+    },
+    {
+      "name": "07-both-conns-up",
+      "description": "Keep 64 publishers and 64 consumers, increase connections for both: 16 publish-only and 16 consume-only connections/channels. Both sides are provisioned; the broker's single exchange/queue dispatch is the expected bottleneck.",
+      "flags": [
+        "-conns", "32",
+        "-pub-conns", "16",
+        "-cons-conns", "16",
+        "-channels", "32",
+        "-publishers", "64",
+        "-consumers", "64",
+        "-msgs", "15625",
+        "-size", "64",
+        "-ack",
+        "-duration", "0",
+        "-warmup", "0s",
+        "-drain-timeout", "5m",
+        "-report", "1s"
+      ]
+    }
+  ]
+}

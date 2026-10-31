@@ -3,15 +3,23 @@ set -euo pipefail
 
 usage() {
   cat <<USAGE
-Usage: $(basename "$0") <scenarios.json> [-n <scenario-name>]
+Usage: $(basename "$0") <scenarios.json> [-n <scenario-name>] [options]
 
 Options:
-  -n, --name <name>   Run only the scenario with this name (default: run all)
-  -h, --help          Show this help message
+  -n, --name <name>       Run only the scenario with this name (default: run all)
+  --addr <host:port>      Broker address to use/check (default: 127.0.0.1:5672)
+  --no-start-broker       Fail if no broker is listening, do not start one
+  --reuse-broker          Prefer reusing existing broker if present (default behavior)
+  -h, --help              Show this help message
+
+Environment:
+  BENCH_BROKER_ADDR       Override broker address (used if --addr not specified)
 
 Examples:
   $(basename "$0") scenarios/baseline.json
   $(basename "$0") scenarios/baseline.json -n single-conn-baseline
+  $(basename "$0") scenarios/baseline.json --addr 127.0.0.1:5672
+  $(basename "$0") scenarios/baseline.json --no-start-broker
 USAGE
 }
 
@@ -21,6 +29,8 @@ BIN_BENCH="$ROOT/bin/benchmark"
 
 SCENARIOS_JSON=""
 SCENARIO_FILTER=""
+BROKER_ADDR="${BENCH_BROKER_ADDR:-127.0.0.1:5672}"
+NO_START_BROKER=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -36,6 +46,22 @@ while [[ $# -gt 0 ]]; do
       fi
       SCENARIO_FILTER="$2"
       shift 2
+      ;;
+    --addr)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --addr requires <host:port>" >&2
+        usage
+        exit 1
+      fi
+      BROKER_ADDR="$2"
+      shift 2
+      ;;
+    --no-start-broker)
+      NO_START_BROKER=true
+      shift
+      ;;
+    --reuse-broker)
+      shift
       ;;
     -*)
       echo "Error: unknown option $1" >&2
@@ -71,6 +97,18 @@ if [[ ! -f "$SCENARIOS_JSON" ]]; then
   exit 1
 fi
 
+# Parse host/port
+BROKER_HOST="${BROKER_ADDR%:*}"
+BROKER_PORT="${BROKER_ADDR##*:}"
+if [[ -z "$BROKER_HOST" || -z "$BROKER_PORT" || "$BROKER_HOST" == "$BROKER_ADDR" ]]; then
+  echo "Error: invalid broker address format (expected host:port): $BROKER_ADDR" >&2
+  exit 1
+fi
+
+check_broker() {
+  timeout 2 bash -c "echo > /dev/tcp/$BROKER_HOST/$BROKER_PORT" 2>/dev/null
+}
+
 COMMIT_SHORT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
 SET_NAME="$(basename "$SCENARIOS_JSON" .json)"
 OUTDIR="$ROOT/results/baselines/$COMMIT_SHORT/$SET_NAME/$(date +%Y%m%d-%H%M%S)"
@@ -81,11 +119,32 @@ if [[ ! -x "$BIN_BROKER" || ! -x "$BIN_BENCH" ]]; then
   (cd "$ROOT" && go build -trimpath -o "$BIN_BROKER" ./cmd/broker && go build -trimpath -o "$BIN_BENCH" ./cmd/benchmark)
 fi
 
-# Start broker
-"$BIN_BROKER" &
-BROKER_PID=$!
-trap 'kill $BROKER_PID 2>/dev/null || true' EXIT
-sleep 2
+BROKER_STARTED_BY_US=false
+BROKER_PID=""
+
+if check_broker; then
+  echo "Using existing broker at $BROKER_ADDR"
+  BROKER_STARTED_BY_US=false
+  BROKER_PID=""
+else
+  if [[ "$NO_START_BROKER" == "true" ]]; then
+    echo "Error: no broker listening at $BROKER_ADDR and --no-start-broker specified" >&2
+    exit 1
+  fi
+  echo "Starting broker at $BROKER_ADDR..."
+  "$BIN_BROKER" &
+  BROKER_PID=$!
+  BROKER_STARTED_BY_US=true
+  sleep 2
+  if ! check_broker; then
+    echo "Error: failed to start broker at $BROKER_ADDR" >&2
+    kill "$BROKER_PID" 2>/dev/null || true
+    exit 1
+  fi
+  echo "Broker started (pid $BROKER_PID)"
+fi
+
+trap 'if [[ "$BROKER_STARTED_BY_US" == "true" && -n "${BROKER_PID:-}" ]]; then kill "$BROKER_PID" 2>/dev/null || true; fi' EXIT
 
 # Create manifest
 cat > "$OUTDIR/manifest.json" << MANIFEST
@@ -97,6 +156,9 @@ cat > "$OUTDIR/manifest.json" << MANIFEST
   "hostname": "$(hostname 2>/dev/null || echo "unknown")",
   "timestamp": "$(date -Iseconds)",
   "broker_config": {"ChannelMax": 10, "FramesMax": 10372, "HeartbeatSec": 10},
+  "broker_addr": "$BROKER_ADDR",
+  "broker_started_by_us": $BROKER_STARTED_BY_US,
+  "broker_pid": $(if [[ "$BROKER_STARTED_BY_US" == "true" && -n "$BROKER_PID" ]]; then echo "$BROKER_PID"; else echo "null"; fi),
   "scenarios_file": "$SCENARIOS_JSON",
   "scenario_set": "$SET_NAME",
   "scenario_filter": "${SCENARIO_FILTER:-all}"
@@ -104,8 +166,9 @@ cat > "$OUTDIR/manifest.json" << MANIFEST
 MANIFEST
 
 export SCENARIO_FILTER
+export BENCH_BROKER_ADDR="$BROKER_ADDR"
 
-python3 - "$SCENARIOS_JSON" "$BIN_BENCH" "$OUTDIR" << 'PYTHON'
+python3 - "$SCENARIOS_JSON" "$BIN_BENCH" "$OUTDIR" "$BROKER_ADDR" << 'PYTHON'
 import json
 import subprocess
 import sys
@@ -114,6 +177,7 @@ import os
 scenarios_file = sys.argv[1]
 bench_bin = sys.argv[2]
 outdir = sys.argv[3]
+broker_addr = sys.argv[4]
 target = os.environ.get('SCENARIO_FILTER') or None
 
 with open(scenarios_file) as f:
@@ -132,8 +196,8 @@ for scenario in scenarios:
     print(f"Running scenario: {name}")
     csv_out = os.path.join(outdir, f"{name}.csv")
     json_out = os.path.join(outdir, f"{name}.json")
-    flags = scenario.get('flags', [])
-    cmd = [bench_bin] + flags + ['-output', csv_out]
+    flags = list(scenario.get('flags', []))
+    cmd = [bench_bin] + flags + ['-addr', broker_addr] + ['-output', csv_out]
     try:
         result = subprocess.run(cmd, cwd=outdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if result.stderr:

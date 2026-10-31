@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "name": "quick-test",
+      "description": "Quick validation test",
+      "flags": [
+        "-conns", "1",
+        "-channels", "1",
+        "-publishers", "1",
+        "-consumers", "1",
+        "-msgs", "1000",
+        "-size", "64",
+        "-ack",
+        "-duration", "0",
+        "-warmup", "0s",
+        "-report", "1s"
+      ]
+    }
+  ]
+}
