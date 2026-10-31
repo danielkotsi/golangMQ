@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/ce08a0ca-10ec-47f4-8597-9ec4440dd6c8
+
 # GolangMQ
 
 A lightweight, in-memory message broker written in Go, implementing a custom JSON protocol over TCP with channel multiplexing inspired by AMQP 0-9-1.
