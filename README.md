@@ -39,17 +39,19 @@ Each TCP connection supports multiple logical channels. Frames are wrapped in an
 
 ## Quick Start
 
-### 1. Start the broker
+### 1. Start the stack (docker compose)
 
 ```bash
-go run ./cmd/broker
+docker compose up -d --build
 ```
 
-You should see:
+This brings up the broker together with a provisioned Prometheus + Grafana stack:
 
-```
-MQ server started on :5672
-```
+- **Broker** (GOMQ/1): `localhost:5672`
+- **Grafana**: http://localhost:3000 — the provisioned "GolangMQ Overview" dashboard
+- **Prometheus**: http://localhost:9090
+
+To run the broker without Docker instead, use `go run ./cmd/broker` (it listens on `:5672`, the same address the compose broker publishes). Either way, the example clients below connect to `localhost:5672`.
 
 ### 2. Publish messages
 
@@ -162,6 +164,37 @@ Tear down with `docker compose down` (add `-v` to also drop the Prometheus/Grafa
 - **Grafana**: Dashboards and provisioning live under `grafana/` (`grafana/provisioning/`, `grafana/dashboards/`). The overview dashboard tracks connections/queues/exchanges/consumers, publish/deliver rates, queue depth, ack/nack rates, errors/DLQ/drops, consumers/inflight, and connections/errors.
 - **Docs**: See [`docs/observability/`](docs/observability/) for plans, step-by-step setup, and [`docs/observability/OBSERVABILITY_STATUS.md`](docs/observability/OBSERVABILITY_STATUS.md) for current status and known gaps.
 
+### Observe in Grafana
+
+Open http://localhost:3000 and pick **GolangMQ → GolangMQ Overview** (or go straight to http://localhost:3000/d/golangmq-overview). Anonymous viewer access is enabled, so no login is needed; the dashboard defaults to the last 15 minutes and auto-refreshes every 5s.
+
+Panels to watch while traffic flows:
+
+- **Connections / Queues / Exchanges / Consumers** — live topology counts
+- **Publish Rate** and **Deliver Rate** — `rate(golangmq_publish_total[1m])` and `rate(golangmq_deliver_total[1m])`
+- **Queue Depth** — `golangmq_queue_messages` (undispatched backlog)
+- **Ack / Nack Rate** and **Errors / DLQ / Drops** — flow-control and dead-letter activity
+- **Consumers & Inflight** and **Connections & Errors** — saturation and connection health
+
+> Each benchmark run uses a fresh queue (`bench.q.<runid>`), so its label changes every run. If a panel looks empty, widen the time range or filter to the current run's queue name.
+
+### Query Prometheus directly
+
+Prometheus scrapes the broker every 1s, so you can bypass Grafana. Use the web UI at http://localhost:9090 (the *Graph* tab), or the HTTP API:
+
+```bash
+# publish rate over the last minute, per exchange
+curl -s 'localhost:9090/api/v1/query' --data-urlencode 'query=rate(golangmq_publish_total[1m])'
+
+# current queue depths
+curl -s 'localhost:9090/api/v1/query' --data-urlencode 'query=golangmq_queue_messages'
+
+# confirm the broker target is being scraped
+curl -s 'localhost:9090/api/v1/targets' | grep -o '"health":"[a-z]*"'
+```
+
+Handy series: `golangmq_publish_total{exchange}`, `golangmq_enqueue_total{queue}`, `golangmq_deliver_total{queue}`, `golangmq_ack_total{queue}`, `golangmq_nack_total{queue,requeue}`, `golangmq_dead_letter_total{queue}`, `golangmq_drop_total{queue}`, and gauges `golangmq_queue_messages{queue}`, `golangmq_queue_consumers{queue}`, `golangmq_consumer_inflight{queue,consumer}`, `golangmq_connections`.
+
 ## Benchmarking
 
 ### Benchmark CLI
@@ -187,6 +220,28 @@ Use the reusable runner script:
 ```
 
 Scenario definitions live in `scenarios/` (e.g. `scenarios/baseline.json`, `scenarios/scenario.json`). See [`scenarios/README.md`](scenarios/README.md) and [`scenarios/baseline-scenarios.md`](scenarios/baseline-scenarios.md) for details on flags and topology rules.
+
+### Demo: a quick end-to-end run
+
+With the stack already up (`docker compose up -d --build`), run a short acking workload against the compose broker and watch it live:
+
+```bash
+go run ./cmd/benchmark \
+  -addr 127.0.0.1:5672 \
+  -conns 4 -channels 8 -publishers 8 -consumers 8 \
+  -msgs 6000 -size 64 -ack -report 1s \
+  -output /tmp/demo.csv > /tmp/demo.json
+```
+
+- Per-interval progress streams to your terminal (stderr); add `-quiet` to silence it.
+- Open Grafana (http://localhost:3000) while it runs and watch **Publish Rate**, **Deliver Rate**, and **Queue Depth** move.
+- When it completes, the JSON summary (throughput, latency percentiles, totals) is in `/tmp/demo.json` and the per-interval CSV samples in `/tmp/demo.csv`.
+
+Prefer the reusable runner? It starts a broker if one isn't running and files results under `results/`:
+
+```bash
+./scripts/run_baseline.sh scenarios/baseline.json -n single-conn-baseline
+```
 
 ### Results location
 Results are saved under:
